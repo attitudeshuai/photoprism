@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leandro-lugaresi/hub"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -120,7 +119,7 @@ func resetMetaCheck(t *testing.T, photo *entity.Photo) {
 }
 
 // receivePhotoUids drains the subscription and returns the UIDs of all events received.
-func receivePhotoUids(t *testing.T, sub hub.Subscription) (uids []string) {
+func receivePhotoUids(t *testing.T, sub event.Subscription) (uids []string) {
 	t.Helper()
 
 	for _, ev := range receivePhotoEvents(t, sub) {

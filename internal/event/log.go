@@ -3,7 +3,6 @@ package event
 import (
 	"fmt"
 
-	"github.com/leandro-lugaresi/hub"
 	"github.com/sirupsen/logrus"
 
 	"github.com/photoprism/photoprism/pkg/clean"
@@ -23,11 +22,11 @@ var LogBuffer Buffer
 
 // Hook represents a log event hook.
 type Hook struct {
-	hub *hub.Hub
+	hub *Hub
 }
 
 // NewHook creates a new log event hook.
-func NewHook(hub *hub.Hub) *Hook {
+func NewHook(hub *Hub) *Hook {
 	return &Hook{hub: hub}
 }
 

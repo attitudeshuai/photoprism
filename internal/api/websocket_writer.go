@@ -51,6 +51,10 @@ func AppendWebsocketTopics(topics ...string) {
 	WebsocketTopics = append(WebsocketTopics, topics...)
 }
 
+// wsLagEvent is sent to a client when events were dropped from its subscription, so the client
+// can resynchronize its state instead of continuing with a gapped event stream.
+const wsLagEvent = "websocket.lag"
+
 // wsSendMessage sends a message to the WebSocket client.
 func wsSendMessage(topic string, data any, ws *websocket.Conn, writeMutex *sync.Mutex) {
 	if topic == "" || ws == nil || writeMutex == nil {
@@ -64,6 +68,16 @@ func wsSendMessage(topic string, data any, ws *websocket.Conn, writeMutex *sync.
 		return
 	} else if err := ws.WriteJSON(gin.H{"event": topic, "data": data}); err != nil {
 		return
+	}
+}
+
+// wsLagPayload returns the lag signal payload carrying the subscription drop ledger.
+func wsLagPayload(stats event.DropStats) event.Data {
+	return event.Data{
+		"lag":        true,
+		"dropped":    stats.Total,
+		"firstTopic": stats.FirstTopic,
+		"topics":     stats.ByTopic,
 	}
 }
 
@@ -160,9 +174,17 @@ func wsOutgoing(topic, sid string, user entity.User, client wsClientRole, fields
 func wsWriter(ws *websocket.Conn, writeMutex *sync.Mutex, connId string) {
 	pingTicker := time.NewTicker(15 * time.Second)
 
-	// Subscribe to events.
+	// Subscribe to events using the configurable websocket subscription capacity.
 	topics := append([]string(nil), WebsocketTopics...)
-	e := event.Subscribe(topics...)
+
+	e, err := event.SubscribeKind(event.KindWebsocket, topics...)
+	if err != nil {
+		pingTicker.Stop()
+		log.Errorf("websocket: cannot subscribe to events: %s", err)
+		_ = ws.Close()
+
+		return
+	}
 
 	// Set once the connection is reported as narrowed by its client role.
 	reported := false
@@ -189,6 +211,13 @@ func wsWriter(ws *websocket.Conn, writeMutex *sync.Mutex, connId string) {
 			}
 
 			writeMutex.Unlock()
+		case <-e.LagNotify():
+			// The subscription lost events since the last signal; tell the client to resync.
+			stats := e.DropStats()
+
+			wsSendMessage(wsLagEvent, wsLagPayload(stats), ws, writeMutex)
+
+			e.AckLag(stats.Total)
 		case msg := <-e.Receiver:
 			wsAuth.mutex.RLock()
 

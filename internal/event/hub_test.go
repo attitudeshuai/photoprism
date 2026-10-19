@@ -3,20 +3,19 @@ package event
 import (
 	"testing"
 
-	"github.com/leandro-lugaresi/hub"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestSharedHub(t *testing.T) {
 	h := SharedHub()
 
-	assert.IsType(t, &hub.Hub{}, h)
+	assert.IsType(t, &Hub{}, h)
 }
 
 func TestPublishSubscribe(t *testing.T) {
 	s := Subscribe("foo.bar")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	Publish("foo.bar", Data{"id": 13})
 
@@ -33,7 +32,7 @@ func TestPublishSubscribe(t *testing.T) {
 func TestError(t *testing.T) {
 	s := Subscribe("notify.error")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	Error("error message")
 	msg := <-s.Receiver
@@ -52,7 +51,7 @@ func TestError(t *testing.T) {
 func TestSuccess(t *testing.T) {
 	s := Subscribe("notify.success")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	Success("success message")
 	msg := <-s.Receiver
@@ -66,7 +65,7 @@ func TestSuccess(t *testing.T) {
 func TestInfo(t *testing.T) {
 	s := Subscribe("notify.info")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	Info("info message")
 	msg := <-s.Receiver
@@ -80,7 +79,7 @@ func TestInfo(t *testing.T) {
 func TestWarning(t *testing.T) {
 	s := Subscribe("notify.warning")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	Warn("warning message")
 	msg := <-s.Receiver

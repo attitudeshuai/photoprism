@@ -3,14 +3,13 @@ package event
 import (
 	"testing"
 
-	"github.com/leandro-lugaresi/hub"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestEntitiesUpdated(t *testing.T) {
 	s := Subscribe("test.updated")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	entities := "test"
 	EntitiesUpdated("test", entities)
@@ -25,7 +24,7 @@ func TestEntitiesUpdated(t *testing.T) {
 func TestEntitiesCreated(t *testing.T) {
 	s := Subscribe("test.created")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	entities := "test"
 	EntitiesCreated("test", entities)
@@ -40,7 +39,7 @@ func TestEntitiesCreated(t *testing.T) {
 func TestEntitiesDeleted(t *testing.T) {
 	s := Subscribe("test.deleted")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	entities := "test"
 	EntitiesDeleted("test", entities)
@@ -55,7 +54,7 @@ func TestEntitiesDeleted(t *testing.T) {
 func TestEntitiesArchived(t *testing.T) {
 	s := Subscribe("test.archived")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	entities := "test"
 	EntitiesArchived("test", entities)
@@ -70,7 +69,7 @@ func TestEntitiesArchived(t *testing.T) {
 func TestEntitiesRestored(t *testing.T) {
 	s := Subscribe("test.restored")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	entities := "test"
 	EntitiesRestored("test", entities)
@@ -85,7 +84,7 @@ func TestEntitiesRestored(t *testing.T) {
 func TestEntitiesUpdatedUIDs(t *testing.T) {
 	s := Subscribe("test.updated")
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, Subscription{}, s)
 
 	entities := []string{"a", "b"}
 	EntitiesUpdated("test", entities)

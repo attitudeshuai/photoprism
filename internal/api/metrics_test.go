@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 	reg "github.com/photoprism/photoprism/internal/service/cluster/registry"
 	"github.com/photoprism/photoprism/pkg/http/header"
@@ -158,6 +160,34 @@ func TestGetMetrics(t *testing.T) {
 		assert.Regexp(t, regexp.MustCompile(`photoprism_cluster_nodes{role="service"} `+floatPattern), body)
 		infoPattern := `photoprism_cluster_info\{(?:cidr="[^"]*",[^}]*uuid="[^"]*"|uuid="[^"]*",[^}]*cidr="[^"]*")\} 1`
 		assert.Regexp(t, regexp.MustCompile(infoPattern), body)
+	})
+	t.Run("ExposeEventDropMetrics", func(t *testing.T) {
+		sub, err := event.SubscribeCap(1, "metrics.test.*")
+		require.NoError(t, err)
+
+		defer event.Unsubscribe(sub)
+
+		event.Publish("metrics.test.dropped", event.Data{"seq": 1})
+		event.Publish("metrics.test.dropped", event.Data{"seq": 2})
+		event.Publish("metrics.test.dropped", event.Data{"seq": 3})
+
+		require.Equal(t, int64(2), sub.DroppedTotal())
+
+		app, router, _ := NewApiTest()
+
+		GetMetrics(router)
+
+		resp := PerformRequestWithStream(app, "GET", "/api/v1/metrics")
+
+		if resp.Code != http.StatusOK {
+			t.Fatal(resp.Body.String())
+		}
+
+		body := resp.Body.String()
+		floatPattern := `[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?`
+
+		assert.Regexp(t, regexp.MustCompile(`photoprism_events_dropped{topic="metrics\.test\.dropped"} 2\b`), body)
+		assert.Regexp(t, regexp.MustCompile(`photoprism_events_subscriptions `+floatPattern), body)
 	})
 	t.Run("HasPrometheusExpositionFormatAsContentType", func(t *testing.T) {
 		app, router, _ := NewApiTest()

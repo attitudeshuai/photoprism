@@ -25,6 +25,7 @@ Additional information can be found in our Developer Guide:
 
 import Sockette from "sockette";
 import $event from "common/event";
+import { $view } from "common/view";
 import { $config } from "app/session";
 
 const host = window.location.host;
@@ -35,6 +36,35 @@ const socketUrl = protocol + host + apiUri + "/ws";
 // Reconnect delay in milliseconds, and its maximum while the server reports too many failed authentications.
 export const reconnectTimeout = 5e3;
 export const maxReconnectTimeout = 60e3;
+
+// lagEvent is sent by the server when events were dropped for this connection. The event stream
+// has gaps then, so the client must refetch full state instead of applying incremental updates.
+export const lagEvent = "websocket.lag";
+
+// resyncing collapses repeated lag signals into one full-state refetch while drops continue.
+let resyncing = false;
+
+// resynchronize refetches config and counts and reloads the active view after a server-side
+// event overflow made the incremental event stream incomplete.
+export function resynchronize(data) {
+  console.warn("websocket: server dropped events, resynchronizing state", data || {});
+
+  const current = $view.current;
+
+  if (current && typeof current.refresh === "function") {
+    current.refresh();
+  }
+
+  if (resyncing) {
+    return;
+  }
+
+  resyncing = true;
+
+  $config.update().finally(() => {
+    resyncing = false;
+  });
+}
 
 // nextReconnectTimeout returns the reconnect delay after a server message, doubling it up to the maximum
 // while the server reports too many failed authentications and restoring the default otherwise.
@@ -59,6 +89,10 @@ const options = {
     const m = JSON.parse(e.data);
     options.timeout = nextReconnectTimeout(options.timeout, m.event);
     $event.publish(m.event, m.data);
+
+    if (m.event === lagEvent) {
+      resynchronize(m.data);
+    }
   },
   onreconnect: () => console.log("websocket: reconnecting"),
   onmaximum: () => console.warn("websocket: hit max reconnect limit"),

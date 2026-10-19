@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize/english"
-	"github.com/leandro-lugaresi/hub"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -135,7 +134,7 @@ func TestIndex_StartMissingPath(t *testing.T) {
 }
 
 // assertMissingFolderNotice waits for the notification with the prefix and checks the folder name it shows.
-func assertMissingFolderNotice(t *testing.T, receiver <-chan hub.Message, prefix, folder, storagePath string) {
+func assertMissingFolderNotice(t *testing.T, receiver <-chan event.Message, prefix, folder, storagePath string) {
 	t.Helper()
 	timeout := time.After(5 * time.Second)
 

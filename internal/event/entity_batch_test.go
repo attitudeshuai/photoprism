@@ -4,13 +4,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leandro-lugaresi/hub"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // subscribeEntityBatch subscribes to a test topic for the duration of a test.
-func subscribeEntityBatch(t *testing.T, topic string) hub.Subscription {
+func subscribeEntityBatch(t *testing.T, topic string) Subscription {
 	t.Helper()
 
 	sub := Subscribe(topic)
@@ -20,7 +19,7 @@ func subscribeEntityBatch(t *testing.T, topic string) hub.Subscription {
 }
 
 // receiveEntityBatches drains the subscription and returns the identity list of each event received.
-func receiveEntityBatches(t *testing.T, sub hub.Subscription) (events [][]string) {
+func receiveEntityBatches(t *testing.T, sub Subscription) (events [][]string) {
 	t.Helper()
 
 	for {

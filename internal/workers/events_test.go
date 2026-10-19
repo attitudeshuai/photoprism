@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leandro-lugaresi/hub"
 	"github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
@@ -13,7 +12,7 @@ import (
 )
 
 // subscribePhotoEvents subscribes to photos.<action> events for the duration of a test.
-func subscribePhotoEvents(t *testing.T, action string) hub.Subscription {
+func subscribePhotoEvents(t *testing.T, action string) event.Subscription {
 	t.Helper()
 
 	sub := event.Subscribe("photos." + action)
@@ -23,7 +22,7 @@ func subscribePhotoEvents(t *testing.T, action string) hub.Subscription {
 }
 
 // receivePhotoEvents drains the subscription and returns the UID list of each event received.
-func receivePhotoEvents(t *testing.T, sub hub.Subscription) (events [][]string) {
+func receivePhotoEvents(t *testing.T, sub event.Subscription) (events [][]string) {
 	t.Helper()
 
 	for {
@@ -40,7 +39,7 @@ func receivePhotoEvents(t *testing.T, sub hub.Subscription) (events [][]string) 
 
 // eventsAtLog is a log hook that records how many events a subscription held when a matching message was logged.
 type eventsAtLog struct {
-	sub   hub.Subscription
+	sub   event.Subscription
 	match func(string) bool
 	seen  bool
 	count int
@@ -62,7 +61,7 @@ func (h *eventsAtLog) Fire(entry *logrus.Entry) error {
 }
 
 // captureEventsAtLog replaces the package logger with one that counts the events buffered when match first holds.
-func captureEventsAtLog(t *testing.T, sub hub.Subscription, match func(string) bool) *eventsAtLog {
+func captureEventsAtLog(t *testing.T, sub event.Subscription, match func(string) bool) *eventsAtLog {
 	t.Helper()
 
 	h := &eventsAtLog{sub: sub, match: match}

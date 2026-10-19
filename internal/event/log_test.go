@@ -24,7 +24,7 @@ func TestHook_Fire(t *testing.T) {
 		t.Helper()
 
 		h := NewHub()
-		s := h.Subscribe(10, "log.*")
+		s := h.NonBlockingSubscribe(10, "log.*")
 		defer h.Unsubscribe(s)
 
 		entry := &logrus.Entry{Level: logrus.ErrorLevel, Message: msg, Time: time.Now()}

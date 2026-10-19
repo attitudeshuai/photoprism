@@ -2,6 +2,10 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 
 const sockette = vi.hoisted(() => ({ opts: null }));
+const viewState = vi.hoisted(() => ({ refresh: vi.fn() }));
+const configState = vi.hoisted(() => ({
+  update: vi.fn(() => Promise.resolve()),
+}));
 
 vi.mock("sockette", () => ({
   default: vi.fn(function (url, opts) {
@@ -10,15 +14,25 @@ vi.mock("sockette", () => ({
 }));
 
 vi.mock("app/session", () => ({
-  $config: { disconnected: { value: false } },
+  $config: { disconnected: { value: false }, update: configState.update },
+}));
+
+vi.mock("common/view", () => ({
+  $view: {
+    current: { refresh: viewState.refresh },
+  },
 }));
 
 // The setup file already loaded the module with the real Sockette, so it is imported again here.
-let nextReconnectTimeout, reconnectTimeout, maxReconnectTimeout;
+let nextReconnectTimeout, reconnectTimeout, maxReconnectTimeout, lagEvent;
 
 beforeAll(async () => {
   vi.resetModules();
-  ({ nextReconnectTimeout, reconnectTimeout, maxReconnectTimeout } = await import("common/websocket"));
+  ({ nextReconnectTimeout, reconnectTimeout, maxReconnectTimeout, lagEvent } = await import("common/websocket"));
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
 });
 
 describe("common/websocket.js", () => {
@@ -49,6 +63,54 @@ describe("common/websocket.js", () => {
 
       opts.onmessage({ data: JSON.stringify({ event: "config.updated", data: {} }) });
       expect(opts.timeout).toBe(reconnectTimeout);
+    });
+  });
+
+  describe("lag signal", () => {
+    it("refetches config and reloads the active view on websocket.lag", async () => {
+      const opts = sockette.opts;
+      const data = { lag: true, dropped: 3, firstTopic: "photos.updated", topics: { "photos.updated": 3 } };
+
+      opts.onmessage({ data: JSON.stringify({ event: lagEvent, data }) });
+
+      expect(viewState.refresh).toHaveBeenCalledTimes(1);
+      expect(configState.update).toHaveBeenCalledTimes(1);
+
+      await configState.update.mock.results[0].value;
+      await Promise.resolve();
+    });
+
+    it("collapses repeated lag signals while a resynchronization is running", async () => {
+      const opts = sockette.opts;
+      let resolveUpdate;
+
+      configState.update.mockImplementationOnce(
+        () => new Promise((resolve) => {
+          resolveUpdate = resolve; 
+        }),
+      );
+
+      opts.onmessage({ data: JSON.stringify({ event: lagEvent, data: { dropped: 1 } }) });
+      opts.onmessage({ data: JSON.stringify({ event: lagEvent, data: { dropped: 2 } }) });
+      opts.onmessage({ data: JSON.stringify({ event: lagEvent, data: { dropped: 3 } }) });
+
+      expect(configState.update).toHaveBeenCalledTimes(1);
+      expect(viewState.refresh).toHaveBeenCalledTimes(3);
+
+      resolveUpdate();
+      await Promise.resolve();
+
+      opts.onmessage({ data: JSON.stringify({ event: lagEvent, data: { dropped: 4 } }) });
+      expect(configState.update).toHaveBeenCalledTimes(2);
+    });
+
+    it("leaves ordinary messages without resynchronization", () => {
+      const opts = sockette.opts;
+
+      opts.onmessage({ data: JSON.stringify({ event: "photos.updated", data: { entities: [] } }) });
+
+      expect(viewState.refresh).not.toHaveBeenCalled();
+      expect(configState.update).not.toHaveBeenCalled();
     });
   });
 });

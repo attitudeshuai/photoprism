@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leandro-lugaresi/hub"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -59,7 +58,7 @@ func TestIndexCommand(t *testing.T) {
 	var mu sync.Mutex
 	var l string
 
-	assert.IsType(t, hub.Subscription{}, s)
+	assert.IsType(t, event.Subscription{}, s)
 
 	go func() {
 		for msg := range s.Receiver {

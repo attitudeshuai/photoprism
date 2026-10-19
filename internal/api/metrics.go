@@ -14,6 +14,7 @@ import (
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
 	reg "github.com/photoprism/photoprism/internal/service/cluster/registry"
 	"github.com/photoprism/photoprism/pkg/http/header"
@@ -24,6 +25,7 @@ const (
 	metricsUsageSubsystem      = "usage"
 	metricsStatisticsSubsystem = "statistics"
 	metricsClusterSubsystem    = "cluster"
+	metricsEventsSubsystem     = "events"
 
 	metricsLabelState   = "state"
 	metricsLabelStat    = "stat"
@@ -33,15 +35,18 @@ const (
 	metricsLabelEdition = "edition"
 	metricsLabelGoVer   = "goversion"
 	metricsLabelVersion = "version"
+	metricsLabelTopic   = "topic"
 
-	metricFilesBytes     = "files_bytes"
-	metricFilesRatio     = "files_ratio"
-	metricAccountsRatio  = "accounts_ratio"
-	metricAccountsActive = "accounts_active"
-	metricMediaCount     = "media_count"
-	metricBuildInfo      = "build_info"
-	metricClusterNodes   = "nodes"
-	metricClusterInfo    = "info"
+	metricFilesBytes        = "files_bytes"
+	metricFilesRatio        = "files_ratio"
+	metricAccountsRatio     = "accounts_ratio"
+	metricAccountsActive    = "accounts_active"
+	metricMediaCount        = "media_count"
+	metricBuildInfo         = "build_info"
+	metricClusterNodes      = "nodes"
+	metricClusterInfo       = "info"
+	metricEventsDropped     = "dropped"
+	metricEventsSubscribers = "subscriptions"
 
 	metricsAccountsHelp      = "active user and guest accounts on this PhotoPrism instance"
 	metricsFilesBytesHelp    = "filesystem usage in bytes for files indexed by this PhotoPrism instance"
@@ -51,6 +56,8 @@ const (
 	metricsBuildInfoHelp     = "information about the photoprism instance"
 	metricsClusterNodesHelp  = "registered cluster nodes grouped by role"
 	metricsClusterInfoHelp   = "cluster metadata for this PhotoPrism portal"
+	metricsEventsDroppedHelp = "cumulative number of events dropped because a subscriber buffer was full"
+	metricsEventsSubsHelp    = "currently connected event subscriptions"
 )
 
 // GetMetrics provides a Prometheus-compatible metrics endpoint for monitoring the instance, including usage details and portal cluster metrics.
@@ -87,6 +94,7 @@ func GetMetrics(router *gin.RouterGroup) {
 			registerBuildInfoMetric(factory, conf.ClientPublic())
 			registerUsageMetrics(factory, usage)
 			registerClusterMetrics(factory, conf)
+			registerEventMetrics(factory)
 
 			var metrics []*dto.MetricFamily
 			var err error
@@ -272,6 +280,33 @@ func registerClusterMetrics(factory promauto.Factory, conf *config.Config) {
 		metricsLabelUUID: conf.ClusterUUID(),
 		metricsLabelCIDR: conf.ClusterCIDR(),
 	}).Set(1.0)
+}
+
+// registerEventMetrics exports the cumulative event drop ledger and live subscription count.
+func registerEventMetrics(factory promauto.Factory) {
+	stats := event.Stats()
+
+	dropped := factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsEventsSubsystem,
+			Name:      metricEventsDropped,
+			Help:      metricsEventsDroppedHelp,
+		}, []string{metricsLabelTopic},
+	)
+
+	for topic, count := range stats.ByTopic {
+		dropped.With(prometheus.Labels{metricsLabelTopic: topic}).Set(float64(count))
+	}
+
+	factory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsEventsSubsystem,
+			Name:      metricEventsSubscribers,
+			Help:      metricsEventsSubsHelp,
+		},
+	).Set(float64(len(stats.Subscribers)))
 }
 
 // clusterNodeCounts returns cluster node counts keyed by role plus a total entry.

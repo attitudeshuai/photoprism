@@ -1,10 +1,10 @@
 ## PhotoPrism — Event System
 
-**Last Updated:** October 6, 2026
+**Last Updated:** October 15, 2026
 
 ### Overview
 
-`internal/event` provides a lightweight pub/sub hub for in-process notifications. It underpins logging hooks, UI notifications, and domain events (entities created/updated/deleted/archived/restored). The package aliases the `hub` library to keep a stable interface while exposing simple helpers for common topics.
+`internal/event` provides a lightweight pub/sub hub for in-process notifications. It underpins logging hooks, UI notifications, and domain events (entities created/updated/deleted/archived/restored). Subscriptions are non-blocking: a subscriber whose buffer is full never stalls a publisher. Overflow is not silent — every lost event is counted per topic per subscription, cumulative hub-wide counters are kept for operators, and subscriptions expose a lag signal so forwarders such as the websocket writer can tell their clients to resynchronize.
 
 ### Usage
 
@@ -37,6 +37,31 @@ for msg := range sub.Receiver {
     fmt.Printf("topic=%s payload=%v\n", msg.Name, msg.Fields)
 }
 ```
+
+Topic patterns match whole dot-separated segments; `*` matches exactly one segment, so `photos.*` matches `photos.updated` but not `photos.updated.extra`.
+
+### Subscription Capacity & Overflow
+
+Each subscription owns a buffered, non-blocking channel. Capacities are configured per subscription kind:
+
+```go
+// Configure a kind at startup; values outside event.MinCap..event.MaxCap are rejected.
+if err := event.SetCapacity(event.KindWebsocket, 256); err != nil {
+    return err
+}
+
+// Subscribe with the capacity of a configured kind.
+sub, err := event.SubscribeKind(event.KindWebsocket, "photos.*")
+```
+
+`event.Subscribe` uses the `default` kind (capacity 100); `SubscribeCap` sets an explicit capacity and returns `ErrInvalidCapacity` for invalid values. Unknown kinds fail with `ErrUnknownKind` until `SetCapacity` registers them.
+
+When a published event does not fit a subscriber's buffer, it is dropped exactly once and recorded:
+- Per subscription: `sub.DroppedTotal()`, `sub.DroppedByTopic()`, and `sub.DropStats()` report the count, the per-topic breakdown, and the topic and time of the first and most recent loss.
+- Lag signal: `sub.LagNotify()` closes right after the first loss since `sub.AckLag(total)`; forwarders select on it and send a resynchronization notice instead of polling.
+- Hub-wide: `event.Stats()` returns cumulative per-topic counters that survive unsubscribe plus snapshots of all live subscriptions. Operators read them through the `photoprism_events_dropped{topic="..."}` and `photoprism_events_subscriptions` metrics on `/api/v1/metrics`, and the first loss of each subscription is written to the system log.
+
+Without overflow, message order, content, and delivery timing are unchanged; publishing helpers never block on subscribers.
 
 Log hook (used by default logger):
 ```go
@@ -76,9 +101,8 @@ batch.Flush()
 ### Related Packages
 
 - `internal/photoprism` — core indexing/import flows that emit events.
-- `internal/server` — HTTP layer that may consume event notifications.
+- `internal/api` — websocket writer that forwards events and sends the `websocket.lag` signal; metrics endpoint exposing the drop ledger.
 - `internal/ai/vision` & `internal/ffmpeg` — emit log events via the shared logger.
-- External hub library: `github.com/leandro-lugaresi/hub`
 
 ### Testing
 
