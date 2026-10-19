@@ -1,6 +1,6 @@
 ## PhotoPrism — Batch Edit Package
 
-**Last Updated:** October 13, 2026
+**Last Updated:** October 15, 2026
 
 ### Overview
 
@@ -49,6 +49,7 @@ The `internal/photoprism/batch` package implements the form schema (`PhotosForm`
 | Field                   | Type             | Examples                                                     | Notes                                                                                         |
 |:------------------------|:-----------------|:-------------------------------------------------------------|:----------------------------------------------------------------------------------------------|
 | `photos`                | `string[]`       | `['pq1z9t3', 'px4y2k0']`                                     | Required. Contains `PhotoUID` values selected in the UI. Empty lists are rejected with `400`. |
+| `stopOnError`           | `bool`           | `true`                                                       | Optional. When true, the first failed photo ends the batch and later items are reported as not processed. The default (`false`) processes every photo independently. |
 | `values`                | `PhotosForm`     | `{ "Title": { "action": "update", "value": "Vacation" } }`   | Optional. When omitted, the endpoint only loads the selection + aggregated form data.         |
 | `values.Albums.items[]` | `Items` entry    | `{ "value": "ab1c", "title": "Favorites", "action": "add" }` | Action must be `add`/`remove`; `title` is used to create albums when `value` is empty.        |
 | `values.Labels.items[]` | `Items` entry    | `{ "value": "lb2d", "action": "remove" }`                    | Removing requires a valid label UID. Adds accept either UID or plain title.                   |
@@ -112,9 +113,23 @@ The `internal/photoprism/batch` package implements the form schema (`PhotosForm`
         { "value": "trips25", "title": "Trips 2025", "mixed": false, "action": "none" }
       ]
     }
-  }
+  },
+  "status": "partial",
+  "successCount": 1,
+  "failCount": 1,
+  "items": [
+    { "id": "pt1abcd", "ok": true },
+    { "id": "pt2efgh", "ok": false, "error": "item not found" }
+  ]
 }
 ```
+
+When the request applies changes, the same response carries the shared per-item result structure used by the other batch endpoints (`internal/batchresult`):
+
+- `status` is `success`, `partial`, or `failed`; requests that only load the selection (no `values`) omit these fields.
+- `items` lists every requested UID in selection order with `ok` and, on failure, a client-safe `error` reason.
+- `stopped` is true when `stopOnError: true` ended the batch; items never reached carry `item not processed: batch stopped after an earlier error`.
+- A second batch edit running concurrently is rejected with HTTP 429 and per-item failures (`edit already running`), since `mutex.BatchEdit` serializes edits and no item of the rejected request is applied.
 
 ### Frontend Integration
 

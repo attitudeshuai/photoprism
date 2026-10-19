@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"path"
 	"time"
@@ -8,9 +9,9 @@ import (
 	"github.com/dustin/go-humanize/english"
 
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/batchresult"
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/query"
@@ -21,6 +22,10 @@ import (
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/i18n"
 )
+
+// errPhotoNotInArchive is the per-item reason when a selected photo cannot be permanently deleted
+// because it is not in the archive.
+var errPhotoNotInArchive = errors.New("photo is not in the archive")
 
 // restrictPhotoSelection narrows frm.Photos to the pictures the session may access, so a batch
 // action stays within the session's shared scope, mirroring the single-photo and album update
@@ -47,7 +52,7 @@ func restrictPhotoSelection(c *gin.Context, s *entity.Session, frm *form.Selecti
 //	@Tags		Photos
 //	@Accept		json
 //	@Produce	json
-//	@Success	200							{object}	i18n.Response
+//	@Success	200							{object}	api.SelectionResponse
 //	@Failure	400,401,403,404,413,429,500	{object}	i18n.Response
 //	@Param		photos						body		form.Selection	true	"Photo Selection"
 //	@Router		/api/v1/batch/photos/archive [post]
@@ -86,41 +91,42 @@ func BatchPhotosArchive(router *gin.RouterGroup) {
 
 		log.Infof("photos: archiving %s", clean.Log(frm.String()))
 
-		if get.Config().SidecarYaml() {
-			// Fetch selection from index.
-			photos, err := query.SelectedPhotosForSession(frm, s)
+		// Fetch selection from index.
+		photos, err := query.SelectedPhotosForSession(frm, s)
 
-			if err != nil {
-				AbortEntityNotFound(c)
-				return
-			}
-
-			for _, p := range photos {
-				if archiveErr := p.Archive(); archiveErr != nil {
-					log.Errorf("archive: %s", archiveErr)
-				} else {
-					SaveSidecarYaml(p)
-				}
-			}
-		} else if err := entity.Db().Where("photo_uid IN (?)", frm.Photos).Delete(&entity.Photo{}).Error; err != nil {
-			log.Errorf("archive: failed to archive %d pictures (%s)", len(frm.Photos), err)
-			AbortSaveFailed(c)
+		if err != nil {
+			AbortEntityNotFound(c)
 			return
-		} else if err = entity.Db().Model(&entity.PhotoAlbum{}).Where("photo_uid IN (?)", frm.Photos).UpdateColumn("hidden", true).Error; err != nil {
-			log.Errorf("archive: failed to flag %d pictures as hidden (%s)", len(frm.Photos), err)
 		}
 
-		// Update precalculated photo and file counts.
-		entity.UpdateCountsAsync()
+		saveSidecar := func(p *entity.Photo) {}
 
-		// Update album, subject, and label cover thumbs.
-		query.UpdateCoversAsync()
+		if get.Config().SidecarYaml() {
+			saveSidecar = SaveSidecarYaml
+		}
 
-		UpdateClientConfig()
+		res := runPhotoBatch(&frm, photos, func(p *entity.Photo) error {
+			return p.Archive()
+		}, saveSidecar, func(state photoBatchState) bool {
+			// Archived and not removed.
+			return state.DeletedAt.Valid && state.PhotoQuality > -1
+		})
 
-		event.EntitiesArchived("photos", frm.Photos)
+		if res.SuccessCount > 0 {
+			// Update precalculated photo and file counts.
+			entity.UpdateCountsAsync()
 
-		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgSelectionArchived))
+			// Update album, subject, and label cover thumbs.
+			query.UpdateCoversAsync()
+
+			UpdateClientConfig()
+
+			event.EntitiesArchived("photos", succeededUIDs(res))
+		}
+
+		logBatchErrors("archive", res)
+
+		respondBatch(c, http.StatusOK, i18n.MsgSelectionArchived, res)
 	})
 }
 
@@ -131,7 +137,7 @@ func BatchPhotosArchive(router *gin.RouterGroup) {
 //	@Tags		Photos
 //	@Accept		json
 //	@Produce	json
-//	@Success	200							{object}	i18n.Response
+//	@Success	200							{object}	api.SelectionResponse
 //	@Failure	400,401,403,404,413,429,500	{object}	i18n.Response
 //	@Param		photos						body		form.Selection	true	"Photo Selection"
 //	@Router		/api/v1/batch/photos/restore [post]
@@ -169,40 +175,41 @@ func BatchPhotosRestore(router *gin.RouterGroup) {
 
 		log.Infof("photos: restoring %s", clean.Log(frm.String()))
 
-		if get.Config().SidecarYaml() {
-			// Fetch selection from index.
-			photos, err := query.SelectedPhotosForSession(frm, s)
+		// Fetch selection from index.
+		photos, err := query.SelectedPhotosForSession(frm, s)
 
-			if err != nil {
-				AbortEntityNotFound(c)
-				return
-			}
-
-			for _, p := range photos {
-				if err = p.Restore(); err != nil {
-					log.Errorf("restore: %s", err)
-				} else {
-					SaveSidecarYaml(p)
-				}
-			}
-		} else if err := entity.Db().Unscoped().Model(&entity.Photo{}).Where("photo_uid IN (?)", frm.Photos).
-			UpdateColumn("deleted_at", gorm.Expr("NULL")).Error; err != nil {
-			log.Errorf("restore: %s", err)
-			AbortSaveFailed(c)
+		if err != nil {
+			AbortEntityNotFound(c)
 			return
 		}
 
-		// Update precalculated photo and file counts.
-		entity.UpdateCountsAsync()
+		saveSidecar := func(p *entity.Photo) {}
 
-		// Update album, subject, and label cover thumbs.
-		query.UpdateCoversAsync()
+		if get.Config().SidecarYaml() {
+			saveSidecar = SaveSidecarYaml
+		}
 
-		UpdateClientConfig()
+		res := runPhotoBatch(&frm, photos, func(p *entity.Photo) error {
+			return p.Restore()
+		}, saveSidecar, func(state photoBatchState) bool {
+			return !state.DeletedAt.Valid
+		})
 
-		event.EntitiesRestored("photos", frm.Photos)
+		if res.SuccessCount > 0 {
+			// Update precalculated photo and file counts.
+			entity.UpdateCountsAsync()
 
-		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgSelectionRestored))
+			// Update album, subject, and label cover thumbs.
+			query.UpdateCoversAsync()
+
+			UpdateClientConfig()
+
+			event.EntitiesRestored("photos", succeededUIDs(res))
+		}
+
+		logBatchErrors("restore", res)
+
+		respondBatch(c, http.StatusOK, i18n.MsgSelectionRestored, res)
 	})
 }
 
@@ -213,7 +220,7 @@ func BatchPhotosRestore(router *gin.RouterGroup) {
 //	@Tags		Photos
 //	@Accept		json
 //	@Produce	json
-//	@Success	200						{object}	i18n.Response
+//	@Success	200						{object}	api.SelectionResponse
 //	@Failure	400,401,403,404,413,429	{object}	i18n.Response
 //	@Param		photos					body		form.Selection	true	"Photo Selection"
 //	@Router		/api/v1/batch/photos/approve [post]
@@ -259,22 +266,22 @@ func BatchPhotosApprove(router *gin.RouterGroup) {
 			return
 		}
 
-		var approved entity.Photos
+		res := runPhotoBatch(&frm, photos, func(p *entity.Photo) error {
+			return p.Approve()
+		}, SaveSidecarYaml, func(state photoBatchState) bool {
+			// Mirrors entity.Photo.Approved() for the freshly written row.
+			return !state.DeletedAt.Valid && (state.PhotoQuality >= 3 || state.PhotoType != entity.MediaImage || state.EditedAt != nil)
+		})
 
-		for _, p := range photos {
-			if err = p.Approve(); err != nil {
-				log.Errorf("approve: %s", err)
-			} else {
-				approved = append(approved, p)
-				SaveSidecarYaml(p)
-			}
+		if res.SuccessCount > 0 {
+			UpdateClientConfig()
+
+			event.EntitiesUpdated("photos", succeededUIDs(res))
 		}
 
-		UpdateClientConfig()
+		logBatchErrors("approve", res)
 
-		event.EntitiesUpdated("photos", approved.UIDs())
-
-		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgSelectionApproved))
+		respondBatch(c, http.StatusOK, i18n.MsgSelectionApproved, res)
 	})
 }
 
@@ -285,7 +292,7 @@ func BatchPhotosApprove(router *gin.RouterGroup) {
 //	@Tags		Photos
 //	@Accept		json
 //	@Produce	json
-//	@Success	200							{object}	i18n.Response
+//	@Success	200							{object}	api.SelectionResponse
 //	@Failure	400,401,403,404,413,429,500	{object}	i18n.Response
 //	@Param		photos						body		form.Selection	true	"Photo Selection"
 //	@Router		/api/v1/batch/photos/private [post]
@@ -323,30 +330,105 @@ func BatchPhotosPrivate(router *gin.RouterGroup) {
 
 		log.Infof("photos: updating private flag for %s", clean.Log(frm.String()))
 
-		if err := entity.Db().Model(&entity.Photo{}).Where("photo_uid IN (?)", frm.Photos).UpdateColumn("photo_private",
-			gorm.Expr("CASE WHEN photo_private THEN FALSE ELSE TRUE END")).Error; err != nil {
+		// Fetch selection from index for sidecar exports.
+		photos, err := query.SelectedPhotosForSession(frm, s)
+
+		if err != nil {
+			AbortEntityNotFound(c)
+			return
+		}
+
+		byUID := make(map[string]*entity.Photo, len(photos))
+
+		for i := range photos {
+			byUID[photos[i].PhotoUID] = photos[i]
+		}
+
+		// Determine the target state of every item from its current row, so concurrent toggles on
+		// the same photo can be detected by re-reading the state instead of overwriting each other.
+		before, err := loadPhotoBatchStates(frm.Photos)
+
+		if err != nil {
 			log.Errorf("private: %s", err)
 			AbortSaveFailed(c)
 			return
 		}
 
-		// Update precalculated photo and file counts.
-		entity.UpdateCountsAsync()
+		builder := batchresult.NewBuilder(frm.Photos...)
+		targets := make(map[string]bool, len(builder.IDs()))
 
-		// Fetch selection from index.
-		if photos, err := query.SelectedPhotosForSession(frm, s); err == nil {
-			for _, p := range photos {
-				SaveSidecarYaml(p)
+		var applied []string
+
+		for _, uid := range builder.IDs() {
+			state, found := before[uid]
+
+			if !found {
+				builder.Failure(uid, errors.New(uid+": "+batchresult.ErrNotFound.Error()))
+
+				if frm.StopOnError {
+					builder.Stop()
+					break
+				}
+
+				continue
 			}
 
-			event.EntitiesUpdated("photos", photos.UIDs())
+			target := !state.PhotoPrivate
+			targets[uid] = target
+
+			if err := entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+				UpdateColumn("photo_private", target).Error; err != nil {
+				builder.Failure(uid, err)
+
+				if frm.StopOnError {
+					builder.Stop()
+					break
+				}
+
+				continue
+			}
+
+			applied = append(applied, uid)
 		}
 
-		UpdateClientConfig()
+		after, err := loadPhotoBatchStatesFunc(applied)
 
-		FlushCoverCache()
+		if err != nil {
+			log.Errorf("private: %s (verify result)", err)
 
-		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgSelectionProtected))
+			for _, uid := range applied {
+				builder.Failure(uid, err)
+			}
+		} else {
+			for _, uid := range applied {
+				if state, found := after[uid]; found && state.PhotoPrivate == targets[uid] {
+					builder.Success(uid)
+
+					if p := byUID[uid]; p != nil {
+						SaveSidecarYaml(p)
+					}
+				} else {
+					builder.Failure(uid, errors.New(uid+": "+batchresult.ErrConflict.Error()))
+				}
+			}
+		}
+
+		res := builder.Result()
+
+		if res.SuccessCount > 0 {
+			// Update precalculated photo and file counts.
+			entity.UpdateCountsAsync()
+
+			UpdateClientConfig()
+
+			FlushCoverCache()
+
+			event.EntitiesUpdated("photos", succeededUIDs(res))
+		}
+
+		logBatchErrors("private", res)
+
+		respondBatch(c, http.StatusOK, i18n.MsgSelectionProtected, res)
 	})
 }
 
@@ -357,7 +439,7 @@ func BatchPhotosPrivate(router *gin.RouterGroup) {
 //	@Tags		Photos
 //	@Accept		json
 //	@Produce	json
-//	@Success	200						{object}	i18n.Response
+//	@Success	200						{object}	api.SelectionResponse
 //	@Failure	400,401,403,404,413,429	{object}	i18n.Response
 //	@Param		photos					body		form.Selection	true	"All or Photo Selection"
 //	@Router		/api/v1/batch/photos/delete [post]
@@ -424,24 +506,57 @@ func BatchPhotosDelete(router *gin.RouterGroup) {
 		}
 
 		// Permanently delete only the selected photos that are archived and not removed.
-		if archived := photos.Archived(); len(archived) < len(photos) {
-			log.Infof("archive: skipped %s not in archive", english.Plural(len(photos)-len(archived), "selected photo", "selected photos"))
-			photos = archived
+		archived := photos.Archived()
+
+		if skipped := len(photos) - len(archived); skipped > 0 {
+			log.Infof("archive: skipped %s not in archive", english.Plural(skipped, "selected photo", "selected photos"))
 		}
 
-		// Abort if no photos were found.
-		if len(photos) == 0 {
-			Abort(c, http.StatusBadRequest, i18n.ErrNoItemsSelected)
+		// The builder lists every explicitly requested UID; "all" selections only record failures
+		// to keep the response bounded.
+		var builder *batchresult.Builder
+
+		if frm.All {
+			builder = batchresult.NewBuilder()
+		} else {
+			builder = batchresult.NewBuilder(frm.Photos...)
+
+			// Selected but not archived items cannot be deleted; report them per UID.
+			archivedUIDs := make(map[string]bool, len(archived))
+
+			for _, p := range archived {
+				archivedUIDs[p.PhotoUID] = true
+			}
+
+			for _, p := range photos {
+				if !archivedUIDs[p.PhotoUID] {
+					builder.Failure(p.PhotoUID, errPhotoNotInArchive)
+				}
+			}
+		}
+
+		// Abort if no photos were found in the archive.
+		if len(archived) == 0 {
+			// "Delete all" with an empty archive has no items to report.
+			if len(builder.IDs()) == 0 {
+				Abort(c, http.StatusBadRequest, i18n.ErrNoItemsSelected)
+				return
+			}
+
+			res := builder.Result()
+			respondBatch(c, http.StatusBadRequest, i18n.ErrNoItemsSelected, res)
 			return
 		}
 
-		log.Infof("archive: deleting %s", english.Plural(len(photos), "photo", "photos"))
+		log.Infof("archive: deleting %s", english.Plural(len(archived), "photo", "photos"))
 
-		deleted, numFiles := deleteArchivedPhotos(c, s, photos)
+		deleted, numFiles := deleteArchivedPhotos(c, s, archived, builder, frm.StopOnError, frm.All)
 
 		if numFiles > 0 || len(deleted) > 0 {
 			log.Infof("archive: deleted %s and %s [%s]", english.Plural(numFiles, "file", "files"), english.Plural(len(deleted), "photo", "photos"), time.Since(deleteStart))
 		}
+
+		res := builder.Result()
 
 		// Any photos deleted?
 		if len(deleted) > 0 {
@@ -455,7 +570,8 @@ func BatchPhotosDelete(router *gin.RouterGroup) {
 			event.EntitiesDeleted("photos", deleted.UIDs())
 		}
 
-		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgPermanentlyDeleted))
+		// Per-item causes are already logged by deleteArchivedPhotos, so no batch error log here.
+		respondBatch(c, http.StatusOK, i18n.MsgPermanentlyDeleted, res)
 	})
 }
 
@@ -463,18 +579,33 @@ func BatchPhotosDelete(router *gin.RouterGroup) {
 var archivedPhoto = query.ArchivedPhoto
 
 // deleteArchivedPhotos permanently deletes the photos that are archived when they are reached, using their
-// current rows, and returns the deleted photos with the number of files removed. It stops at the first
-// photo whose state cannot be read.
-func deleteArchivedPhotos(c *gin.Context, s *entity.Session, photos entity.Photos) (deleted entity.Photos, numFiles int) {
+// current rows. It records the per-item outcome in builder and returns the deleted photos with the number
+// of files removed. With stopOnError, the first failure marks all following items as not processed;
+// otherwise remaining photos are handled independently.
+func deleteArchivedPhotos(c *gin.Context, s *entity.Session, photos entity.Photos, builder *batchresult.Builder, stopOnError, all bool) (deleted entity.Photos, numFiles int) {
 	for _, selected := range photos {
 		// Delete only photos that are still archived.
 		p, err := archivedPhoto(selected.ID)
 
 		if err != nil {
 			log.Errorf("archive: %s (%s)", clean.Log(selected.PhotoUID), clean.Error(err))
-			break
+			builder.Failure(selected.PhotoUID, err)
+
+			if stopOnError {
+				stopPhotoBatch(builder, photosAfter(photos, selected))
+				break
+			}
+
+			continue
 		} else if p == nil {
 			log.Infof("archive: skipped %s, no longer in archive", clean.Log(selected.PhotoUID))
+			builder.Failure(selected.PhotoUID, errPhotoNotInArchive)
+
+			if stopOnError {
+				stopPhotoBatch(builder, photosAfter(photos, selected))
+				break
+			}
+
 			continue
 		}
 
@@ -488,10 +619,79 @@ func deleteArchivedPhotos(c *gin.Context, s *entity.Session, photos entity.Photo
 
 		if err != nil {
 			log.Errorf("delete: %s", err)
+			builder.Failure(p.PhotoUID, err)
+
+			if stopOnError {
+				stopPhotoBatch(builder, photosAfter(photos, selected))
+				break
+			}
 		} else {
+			if all {
+				builder.AddSuccess(1)
+			} else {
+				builder.Success(p.PhotoUID)
+			}
+
 			deleted = append(deleted, p)
 		}
 	}
 
 	return deleted, numFiles
+}
+
+// photosAfter returns the UIDs of the photos following current in the given list.
+func photosAfter(photos entity.Photos, current *entity.Photo) []string {
+	uids := make([]string, 0)
+
+	found := false
+
+	for _, p := range photos {
+		if found {
+			uids = append(uids, p.PhotoUID)
+		} else if p == current || p.ID == current.ID {
+			found = true
+		}
+	}
+
+	return uids
+}
+
+// stopPhotoBatch marks the given UIDs, and any other pending item, as not processed.
+func stopPhotoBatch(builder *batchresult.Builder, remaining []string) {
+	for _, uid := range remaining {
+		builder.Failure(uid, batchresult.ErrStopped)
+	}
+
+	builder.Stop()
+}
+
+// logBatchErrors writes one log line per failed batch item so operators still see causes that the
+// response only exposes to the requesting client.
+func logBatchErrors(prefix string, res *batchresult.Result) {
+	if res == nil {
+		return
+	}
+
+	for _, item := range res.Items {
+		if !item.OK && item.Error != batchresult.ErrStopped.Error() {
+			log.Errorf("%s: %s (%s)", prefix, clean.Log(item.ID), item.Error)
+		}
+	}
+}
+
+// succeededUIDs returns the UIDs of the items the operation was applied to.
+func succeededUIDs(res *batchresult.Result) []string {
+	if res == nil {
+		return nil
+	}
+
+	uids := make([]string, 0, res.SuccessCount)
+
+	for _, item := range res.Items {
+		if item.OK {
+			uids = append(uids, item.ID)
+		}
+	}
+
+	return uids
 }

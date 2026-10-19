@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/batchresult"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
@@ -20,7 +21,7 @@ import (
 //	@Tags		Labels
 //	@Accept		json
 //	@Produce	json
-//	@Success	200						{object}	i18n.Response
+//	@Success	200						{object}	api.SelectionResponse
 //	@Failure	400,401,403,413,429,500	{object}	i18n.Response
 //	@Param		labels					body		form.Selection	true	"Label Selection"
 //	@Router		/api/v1/batch/labels/delete [post]
@@ -61,14 +62,29 @@ func BatchLabelsDelete(router *gin.RouterGroup) {
 			return
 		}
 
+		builder := batchresult.NewBuilder(frm.Labels...)
+
 		for _, label := range labels {
-			logErr("labels", label.Delete())
+			if err := label.Delete(); err != nil {
+				logErr("labels", err)
+				builder.Failure(label.LabelUID, err)
+
+				if frm.StopOnError {
+					builder.Stop()
+					break
+				}
+			} else {
+				builder.Success(label.LabelUID)
+			}
 		}
+
+		res := builder.Result()
 
 		UpdateClientConfig()
 
-		event.EntitiesDeleted("labels", frm.Labels)
+		// Only notify clients about labels that were actually deleted.
+		event.EntitiesDeleted("labels", succeededUIDs(res))
 
-		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgLabelsDeleted))
+		respondBatch(c, http.StatusOK, i18n.MsgLabelsDeleted, res)
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/batchresult"
 	"github.com/photoprism/photoprism/internal/entity/query"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
@@ -20,7 +21,7 @@ import (
 //	@Tags		Albums
 //	@Accept		json
 //	@Produce	json
-//	@Success	200						{object}	i18n.Response
+//	@Success	200						{object}	api.SelectionResponse
 //	@Failure	400,401,403,404,413,429	{object}	i18n.Response
 //	@Param		albums					body		form.Selection	true	"Album Selection"
 //	@Router		/api/v1/batch/albums/delete [post]
@@ -56,6 +57,8 @@ func BatchAlbumsDelete(router *gin.RouterGroup) {
 
 		log.Infof("albums: deleting %s", clean.Log(frm.String()))
 
+		builder := batchresult.NewBuilder(albumUIDs...)
+
 		// Fetch albums.
 		albums, queryErr := query.AlbumsByUID(albumUIDs, false)
 
@@ -63,33 +66,43 @@ func BatchAlbumsDelete(router *gin.RouterGroup) {
 			log.Errorf("albums: %s (find)", queryErr)
 		}
 
-		// Abort if no albums with a matching UID were found.
+		// Abort if no albums with a matching UID were found; the per-item details tell clients which
+		// UIDs could not be resolved.
 		if len(albums) == 0 {
-			AbortEntityNotFound(c)
+			res := builder.Result()
+			logBatchErrors("albums", res)
+			respondBatch(c, http.StatusNotFound, i18n.ErrAlbumNotFound, res)
 			return
 		}
 
-		deleted := 0
 		conf := get.Config()
 
 		// Flag matching albums as deleted.
 		for _, a := range albums {
 			if deleteErr := a.Delete(); deleteErr != nil {
 				log.Errorf("albums: %s (delete)", deleteErr)
+				builder.Failure(a.AlbumUID, deleteErr)
+
+				if frm.StopOnError {
+					builder.Stop()
+					break
+				}
 			} else {
 				if conf.BackupAlbums() {
 					SaveAlbumYaml(&a)
 				}
 
-				deleted++
+				builder.Success(a.AlbumUID)
 			}
 		}
 
+		res := builder.Result()
+
 		// Update client config if at least one album was successfully deleted.
-		if deleted > 0 {
+		if res.SuccessCount > 0 {
 			UpdateClientConfig()
 		}
 
-		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgAlbumsDeleted))
+		respondBatch(c, http.StatusOK, i18n.MsgAlbumsDeleted, res)
 	})
 }

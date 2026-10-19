@@ -35,7 +35,7 @@ func TestPreparePhotoSaveRequestsResolvesItemTitles(t *testing.T) {
 		},
 	}
 
-	requests, _, _ := PreparePhotoSaveRequests(search.PhotoResults{}, nil, values)
+	requests, _, _, _ := PreparePhotoSaveRequests(search.PhotoResults{}, nil, values)
 	require.Len(t, requests, 0)
 
 	albumUID := values.Albums.Items[0].Value

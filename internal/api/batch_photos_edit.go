@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/batchresult"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/query"
 	"github.com/photoprism/photoprism/internal/entity/search"
@@ -27,7 +28,7 @@ import (
 //	@Accept		json
 //	@Produce	json
 //	@Success	200							{object}	batch.PhotosResponse
-//	@Failure	400,401,403,404,413,429,500	{object}	i18n.Response
+//	@Failure	400,401,403,404,413,429,500	{object}	api.SelectionResponse
 //	@Param		Request						body		batch.PhotosRequest	true	"photos selection and values"
 //	@Router		/api/v1/batch/photos/edit [post]
 func BatchPhotosEdit(router *gin.RouterGroup) {
@@ -98,15 +99,25 @@ func BatchPhotosEdit(router *gin.RouterGroup) {
 			saveResults  []bool
 			savedAny     bool
 			mutated      bool
+			batchRes     *batchresult.Result
 		)
 
 		if frm.Values != nil {
-			outcome, saveErr := batch.PrepareAndSavePhotos(photos, preloadedPhotos, frm.Values)
+			outcome, saveErr := batch.PrepareAndSavePhotos(photos, preloadedPhotos, frm.Values, frm.StopOnError)
 
 			switch {
 			case errors.Is(saveErr, batch.ErrBatchEditBusy), errors.Is(saveErr, batch.ErrBatchEditCanceled):
 				log.Warnf("batch: %s (save)", saveErr)
-				AbortBusy(c)
+
+				// Another batch is applying changes, so none of the requested photos were modified;
+				// report every item as failed instead of claiming success.
+				builder := batchresult.NewBuilder(frm.Photos...)
+				builder.FailPending(saveErr)
+
+				c.JSON(http.StatusTooManyRequests, SelectionResponse{
+					Response: i18n.NewResponse(http.StatusTooManyRequests, i18n.ErrBusy),
+					Result:   *builder.Result(),
+				})
 				return
 			case saveErr != nil:
 				log.Errorf("batch: %s (save)", saveErr)
@@ -119,6 +130,7 @@ func BatchPhotosEdit(router *gin.RouterGroup) {
 			saveResults = outcome.Results
 			preloadedPhotos = outcome.Preloaded
 			savedAny = outcome.SavedAny
+			batchRes = outcome.ItemResults(frm.Photos)
 			mutated = savedAny || outcome.Stats.AlbumMutations > 0 || outcome.Stats.LabelMutations > 0
 
 			if n := len(saveRequests); n > 0 && mutated {
@@ -162,26 +174,21 @@ func BatchPhotosEdit(router *gin.RouterGroup) {
 		// Signal frontend caches (Photo._cache LRU and any future per-UID
 		// consumers) to drop the affected entries; emitting one event for
 		// the whole batch avoids the per-UID event storm that calling
-		// PublishPhotoEvent for each photo would produce. Fires whenever any
-		// mutation landed — including label/album-only changes that leave
-		// SaveBatchResult.Results[i] false but still alter visible state.
-		if mutated && len(saveRequests) > 0 {
-			affectedUIDs := make([]string, 0, len(saveRequests))
-			for _, req := range saveRequests {
-				if req != nil && req.Photo != nil && req.Photo.PhotoUID != "" {
-					affectedUIDs = append(affectedUIDs, req.Photo.PhotoUID)
-				}
-			}
-
-			if len(affectedUIDs) > 0 {
-				event.EntitiesUpdated("photos", affectedUIDs)
-			}
+		// PublishPhotoEvent for each photo would produce. Fires for items
+		// whose changes took effect, including label/album-only edits that
+		// leave SaveBatchResult.Results[i] false but still alter visible state.
+		if mutated && batchRes != nil && batchRes.SuccessCount > 0 {
+			event.EntitiesUpdated("photos", succeededUIDs(batchRes))
 		}
 
-		// Return models and form values.
+		// Return models and form values, together with the per-item result.
 		data := batch.PhotosResponse{
 			Models: photos,
 			Values: batchFrm,
+		}
+
+		if batchRes != nil {
+			data.Result = *batchRes
 		}
 
 		c.JSON(http.StatusOK, data)

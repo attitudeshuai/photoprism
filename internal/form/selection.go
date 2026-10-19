@@ -4,13 +4,15 @@ import "strings"
 
 // Selection represents items selected in the user interface.
 type Selection struct {
-	All      bool     `json:"all"`
-	Files    []string `json:"files"`
-	Photos   []string `json:"photos"`
-	Albums   []string `json:"albums"`
-	Labels   []string `json:"labels"`
-	Places   []string `json:"places"`
-	Subjects []string `json:"subjects"`
+	All bool `json:"all"`
+	// StopOnError ends the batch after the first failed item instead of processing the remaining ones.
+	StopOnError bool     `json:"stopOnError,omitempty"`
+	Files       []string `json:"files"`
+	Photos      []string `json:"photos"`
+	Albums      []string `json:"albums"`
+	Labels      []string `json:"labels"`
+	Places      []string `json:"places"`
+	Subjects    []string `json:"subjects"`
 }
 
 // Empty checks if any specific items were selected.

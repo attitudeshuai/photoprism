@@ -5,8 +5,10 @@ import "strings"
 // PhotosRequest represents the items selected in the user interface,
 // including form values in case changes should be made.
 type PhotosRequest struct {
-	Photos []string    `json:"photos"`
-	Values *PhotosForm `json:"values,omitempty"`
+	Photos []string `json:"photos"`
+	// StopOnError ends the batch after the first failed photo instead of processing the remaining ones.
+	StopOnError bool        `json:"stopOnError,omitempty"`
+	Values      *PhotosForm `json:"values,omitempty"`
 }
 
 // Empty checks if any specific items were selected.

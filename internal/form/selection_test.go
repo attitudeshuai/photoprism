@@ -1,9 +1,11 @@
 package form
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSelection_Empty(t *testing.T) {
@@ -49,5 +51,18 @@ func TestSelection_String(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		sel := Selection{Photos: []string{"p123", "p456"}, Albums: []string{"a123"}, Labels: []string{"l123", "l456", "l789"}, Files: []string{"f567", "f111"}, Places: []string{"p568"}}
 		assert.Equal(t, "p123, p456, a123, l123, l456, l789, p568", sel.String())
+	})
+}
+
+func TestSelection_StopOnError(t *testing.T) {
+	t.Run("DefaultsToContinue", func(t *testing.T) {
+		var sel Selection
+		require.NoError(t, json.Unmarshal([]byte(`{"photos": ["p1"]}`), &sel))
+		assert.False(t, sel.StopOnError)
+	})
+	t.Run("Enabled", func(t *testing.T) {
+		var sel Selection
+		require.NoError(t, json.Unmarshal([]byte(`{"photos": ["p1"], "stopOnError": true}`), &sel))
+		assert.True(t, sel.StopOnError)
 	})
 }

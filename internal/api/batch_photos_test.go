@@ -9,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -20,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
+	"github.com/photoprism/photoprism/internal/batchresult"
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
@@ -66,6 +70,14 @@ func TestBatchPhotosArchive(t *testing.T) {
 		val2 := gjson.Get(r2.Body.String(), "message")
 		assert.Contains(t, val2.String(), "Selection archived")
 		assert.Equal(t, http.StatusOK, r2.Code)
+		assert.Equal(t, "success", gjson.Get(r2.Body.String(), "status").String())
+		assert.Equal(t, int64(2), gjson.Get(r2.Body.String(), "successCount").Int())
+		assert.Equal(t, int64(0), gjson.Get(r2.Body.String(), "failCount").Int())
+		assert.Len(t, gjson.Get(r2.Body.String(), "items").Array(), 2)
+		for _, item := range gjson.Get(r2.Body.String(), "items").Array() {
+			assert.True(t, item.Get("ok").Bool(), item.Get("id").String())
+			assert.Empty(t, item.Get("error").String())
+		}
 		for _, link := range links {
 			var archived entity.PhotoAlbum
 			require.NoError(t, entity.Db().Where("photo_uid = ? AND album_uid = ?", link.PhotoUID, link.AlbumUID).
@@ -101,6 +113,64 @@ func TestBatchPhotosArchive(t *testing.T) {
 
 		assert.Equal(t, http.StatusRequestEntityTooLarge, r.Code)
 	})
+	t.Run("PartialUnknownUID", func(t *testing.T) {
+		uid := "ps6sg6be2lvl0yh8"
+
+		require.NoError(t, entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+			UpdateColumns(entity.Values{"deleted_at": nil, "photo_quality": 3}).Error)
+		t.Cleanup(func() {
+			_ = entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+				UpdateColumn("deleted_at", nil).Error
+		})
+
+		app, router, _ := NewApiTest()
+		BatchPhotosArchive(router)
+		// Missing UID first; the existing photo must still be processed in continue mode.
+		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/archive", `{"photos": ["ps6sg6be2lvl0missing", "ps6sg6be2lvl0yh8"]}`)
+		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, "Selection archived", gjson.Get(r.Body.String(), "message").String())
+		assert.Equal(t, "partial", gjson.Get(r.Body.String(), "status").String())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "successCount").Int())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "failCount").Int())
+		items := gjson.Get(r.Body.String(), "items").Array()
+		require.Len(t, items, 2)
+		assert.Equal(t, "ps6sg6be2lvl0missing", items[0].Get("id").String())
+		assert.False(t, items[0].Get("ok").Bool())
+		assert.NotEmpty(t, items[0].Get("error").String())
+		assert.Equal(t, uid, items[1].Get("id").String())
+		assert.True(t, items[1].Get("ok").Bool())
+
+		var state entity.Photo
+		require.NoError(t, entity.UnscopedDb().Where("photo_uid = ?", uid).First(&state).Error)
+		assert.True(t, state.DeletedAt.Valid)
+	})
+	t.Run("StopOnError", func(t *testing.T) {
+		uid := "ps6sg6be2lvl0yh8"
+
+		require.NoError(t, entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+			UpdateColumns(entity.Values{"deleted_at": nil, "photo_quality": 3}).Error)
+		t.Cleanup(func() {
+			_ = entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+				UpdateColumn("deleted_at", nil).Error
+		})
+
+		app, router, _ := NewApiTest()
+		BatchPhotosArchive(router)
+		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/archive", `{"photos": ["ps6sg6be2lvl0missing", "ps6sg6be2lvl0yh8"], "stopOnError": true}`)
+		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, "failed", gjson.Get(r.Body.String(), "status").String())
+		assert.True(t, gjson.Get(r.Body.String(), "stopped").Bool())
+		assert.Equal(t, int64(0), gjson.Get(r.Body.String(), "successCount").Int())
+		items := gjson.Get(r.Body.String(), "items").Array()
+		require.Len(t, items, 2)
+		assert.False(t, items[0].Get("ok").Bool())
+		assert.Contains(t, items[1].Get("error").String(), "stopped")
+
+		// The second photo must not have been archived.
+		var state entity.Photo
+		require.NoError(t, entity.UnscopedDb().Where("photo_uid = ?", uid).First(&state).Error)
+		assert.False(t, state.DeletedAt.Valid)
+	})
 }
 
 func TestBatchPhotosRestore(t *testing.T) {
@@ -126,6 +196,9 @@ func TestBatchPhotosRestore(t *testing.T) {
 		val := gjson.Get(r.Body.String(), "message")
 		assert.Contains(t, val.String(), "Selection restored")
 		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, "success", gjson.Get(r.Body.String(), "status").String())
+		assert.Equal(t, int64(2), gjson.Get(r.Body.String(), "successCount").Int())
+		assert.Len(t, gjson.Get(r.Body.String(), "items").Array(), 2)
 
 		r4 := PerformRequest(app, "GET", "/api/v1/photos/ps6sg6be2lvl0yh8")
 		assert.Equal(t, http.StatusOK, r4.Code)
@@ -145,6 +218,46 @@ func TestBatchPhotosRestore(t *testing.T) {
 		BatchPhotosRestore(router)
 		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/restore", `{"photos": 123}`)
 		assert.Equal(t, http.StatusBadRequest, r.Code)
+	})
+	t.Run("PartialUnknownUID", func(t *testing.T) {
+		app, router, _ := NewApiTest()
+		BatchPhotosArchive(router)
+		BatchPhotosRestore(router)
+
+		r0 := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/archive", `{"photos": ["ps6sg6be2lvl0yh8"]}`)
+		require.Equal(t, http.StatusOK, r0.Code)
+
+		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/restore", `{"photos": ["ps6sg6be2lvl0missing", "ps6sg6be2lvl0yh8"]}`)
+		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, "partial", gjson.Get(r.Body.String(), "status").String())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "successCount").Int())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "failCount").Int())
+		items := gjson.Get(r.Body.String(), "items").Array()
+		require.Len(t, items, 2)
+		assert.False(t, items[0].Get("ok").Bool())
+		assert.True(t, items[1].Get("ok").Bool())
+	})
+	t.Run("StopOnError", func(t *testing.T) {
+		app, router, _ := NewApiTest()
+		BatchPhotosArchive(router)
+		BatchPhotosRestore(router)
+
+		r0 := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/archive", `{"photos": ["ps6sg6be2lvl0yh8"]}`)
+		require.Equal(t, http.StatusOK, r0.Code)
+		t.Cleanup(func() {
+			_ = entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", "ps6sg6be2lvl0yh8").
+				UpdateColumn("deleted_at", nil).Error
+		})
+
+		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/restore", `{"photos": ["ps6sg6be2lvl0missing", "ps6sg6be2lvl0yh8"], "stopOnError": true}`)
+		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, "failed", gjson.Get(r.Body.String(), "status").String())
+		assert.True(t, gjson.Get(r.Body.String(), "stopped").Bool())
+
+		// The second photo must stay archived.
+		var state entity.Photo
+		require.NoError(t, entity.UnscopedDb().Where("photo_uid = ?", "ps6sg6be2lvl0yh8").First(&state).Error)
+		assert.True(t, state.DeletedAt.Valid)
 	})
 }
 
@@ -170,6 +283,15 @@ func TestBatchAlbumsDelete(t *testing.T) {
 		val2 := gjson.Get(r2.Body.String(), "message")
 		assert.Contains(t, val2.String(), i18n.Msg(i18n.MsgAlbumsDeleted))
 		assert.Equal(t, http.StatusOK, r2.Code)
+		assert.Equal(t, "partial", gjson.Get(r2.Body.String(), "status").String())
+		assert.Equal(t, int64(1), gjson.Get(r2.Body.String(), "successCount").Int())
+		assert.Equal(t, int64(1), gjson.Get(r2.Body.String(), "failCount").Int())
+		items := gjson.Get(r2.Body.String(), "items").Array()
+		require.Len(t, items, 2)
+		assert.Equal(t, uid, items[0].Get("id").String())
+		assert.True(t, items[0].Get("ok").Bool())
+		assert.False(t, items[1].Get("ok").Bool())
+		assert.NotEmpty(t, items[1].Get("error").String())
 
 		r3 := PerformRequest(app, "GET", "/api/v1/albums/"+uid)
 		val3 := gjson.Get(r3.Body.String(), "error")
@@ -218,6 +340,9 @@ func TestBatchPhotosPrivate(t *testing.T) {
 		val2 := gjson.Get(r2.Body.String(), "message")
 		assert.Contains(t, val2.String(), "Selection marked as private")
 		assert.Equal(t, http.StatusOK, r2.Code)
+		assert.Equal(t, "success", gjson.Get(r2.Body.String(), "status").String())
+		assert.Equal(t, int64(2), gjson.Get(r2.Body.String(), "successCount").Int())
+		assert.Len(t, gjson.Get(r2.Body.String(), "items").Array(), 2)
 
 		r3 := PerformRequest(app, "GET", "/api/v1/photos/ps6sg6be2lvl0yh8")
 		assert.Equal(t, http.StatusOK, r3.Code)
@@ -246,6 +371,56 @@ func TestBatchPhotosPrivate(t *testing.T) {
 		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/private", `{"photos": 123}`)
 		assert.Equal(t, http.StatusBadRequest, r.Code)
 	})
+	t.Run("PartialUnknownUID", func(t *testing.T) {
+		uid := "ps6sg6be2lvl0yh8"
+
+		require.NoError(t, entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+			UpdateColumn("photo_private", false).Error)
+		t.Cleanup(func() {
+			_ = entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+				UpdateColumn("photo_private", false).Error
+		})
+
+		app, router, _ := NewApiTest()
+		BatchPhotosPrivate(router)
+		// Missing UID first; the existing photo must still be toggled in continue mode.
+		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/private", `{"photos": ["ps6sg6be2lvl0missing", "ps6sg6be2lvl0yh8"]}`)
+		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, "partial", gjson.Get(r.Body.String(), "status").String())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "successCount").Int())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "failCount").Int())
+		items := gjson.Get(r.Body.String(), "items").Array()
+		require.Len(t, items, 2)
+		assert.False(t, items[0].Get("ok").Bool())
+		assert.True(t, items[1].Get("ok").Bool())
+
+		var state entity.Photo
+		require.NoError(t, entity.UnscopedDb().Where("photo_uid = ?", uid).First(&state).Error)
+		assert.True(t, state.PhotoPrivate)
+	})
+	t.Run("StopOnError", func(t *testing.T) {
+		uid := "ps6sg6be2lvl0yh8"
+
+		require.NoError(t, entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+			UpdateColumn("photo_private", false).Error)
+		t.Cleanup(func() {
+			_ = entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+				UpdateColumn("photo_private", false).Error
+		})
+
+		app, router, _ := NewApiTest()
+		BatchPhotosPrivate(router)
+		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/private", `{"photos": ["ps6sg6be2lvl0missing", "ps6sg6be2lvl0yh8"], "stopOnError": true}`)
+		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, "failed", gjson.Get(r.Body.String(), "status").String())
+		assert.True(t, gjson.Get(r.Body.String(), "stopped").Bool())
+		assert.Contains(t, gjson.Get(r.Body.String(), "items.1.error").String(), "stopped")
+
+		// The second photo must not have been toggled.
+		var state entity.Photo
+		require.NoError(t, entity.UnscopedDb().Where("photo_uid = ?", uid).First(&state).Error)
+		assert.False(t, state.PhotoPrivate)
+	})
 }
 
 func TestBatchLabelsDelete(t *testing.T) {
@@ -273,6 +448,15 @@ func TestBatchLabelsDelete(t *testing.T) {
 		assert.Equal(t, i18n.Msg(i18n.MsgLabelsDeleted), resp.String())
 		assert.Equal(t, http.StatusOK, r2.Code)
 		assert.Equal(t, http.StatusOK, resp.Code)
+		assert.Equal(t, "partial", gjson.Get(r2.Body.String(), "status").String())
+		assert.Equal(t, int64(1), gjson.Get(r2.Body.String(), "successCount").Int())
+		assert.Equal(t, int64(1), gjson.Get(r2.Body.String(), "failCount").Int())
+		items := gjson.Get(r2.Body.String(), "items").Array()
+		require.Len(t, items, 2)
+		assert.Equal(t, "ls6sg6b1wowuy3c6", items[0].Get("id").String())
+		assert.True(t, items[0].Get("ok").Bool())
+		assert.False(t, items[1].Get("ok").Bool())
+		assert.NotEmpty(t, items[1].Get("error").String())
 
 		r3 := PerformRequest(app, "GET", "/api/v1/labels?count=15")
 		val3 := gjson.Get(r3.Body.String(), `#(Name=="BatchDelete").Slug`)
@@ -322,6 +506,9 @@ func TestBatchPhotosApprove(t *testing.T) {
 		val2 := gjson.Get(r2.Body.String(), "message")
 		assert.Contains(t, val2.String(), "Selection approved")
 		assert.Equal(t, http.StatusOK, r2.Code)
+		assert.Equal(t, "success", gjson.Get(r2.Body.String(), "status").String())
+		assert.Equal(t, int64(2), gjson.Get(r2.Body.String(), "successCount").Int())
+		assert.Len(t, gjson.Get(r2.Body.String(), "items").Array(), 2)
 
 		r3 := PerformRequest(app, "GET", "/api/v1/photos/ps6sg6be2lvl0y50")
 		assert.Equal(t, http.StatusOK, r3.Code)
@@ -343,6 +530,21 @@ func TestBatchPhotosApprove(t *testing.T) {
 		BatchPhotosApprove(router)
 		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/approve", `{"photos": 123}`)
 		assert.Equal(t, http.StatusBadRequest, r.Code)
+	})
+	t.Run("PartialUnknownUID", func(t *testing.T) {
+		// ps6sg6be2lvl0y50 was approved by the Success test, so approving again is a successful no-op.
+		app, router, _ := NewApiTest()
+		BatchPhotosApprove(router)
+		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/approve", `{"photos": ["ps6sg6be2lvl0missing", "ps6sg6be2lvl0y50"]}`)
+		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, "partial", gjson.Get(r.Body.String(), "status").String())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "successCount").Int())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "failCount").Int())
+		items := gjson.Get(r.Body.String(), "items").Array()
+		require.Len(t, items, 2)
+		assert.False(t, items[0].Get("ok").Bool())
+		assert.NotEmpty(t, items[0].Get("error").String())
+		assert.True(t, items[1].Get("ok").Bool())
 	})
 }
 
@@ -449,6 +651,9 @@ func TestBatchPhotosDelete(t *testing.T) {
 		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/delete", fmt.Sprintf(`{"photos": [%q, %q]}`, photo1.PhotoUID, photo2.PhotoUID))
 		assert.Equal(t, http.StatusBadRequest, r.Code)
 		assert.Equal(t, i18n.Msg(i18n.ErrNoItemsSelected), gjson.Get(r.Body.String(), "error").String())
+		assert.Equal(t, "failed", gjson.Get(r.Body.String(), "status").String())
+		assert.Equal(t, int64(0), gjson.Get(r.Body.String(), "successCount").Int())
+		assert.Equal(t, int64(2), gjson.Get(r.Body.String(), "failCount").Int())
 
 		assertBatchDeleteTestPhotoKept(t, photo1, file1)
 		assertBatchDeleteTestPhotoKept(t, photo2, file2)
@@ -464,6 +669,18 @@ func TestBatchPhotosDelete(t *testing.T) {
 		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/delete", fmt.Sprintf(`{"photos": [%q, %q]}`, visible.PhotoUID, archived.PhotoUID))
 		assert.Equal(t, http.StatusOK, r.Code)
 		assert.Equal(t, i18n.Msg(i18n.MsgPermanentlyDeleted), gjson.Get(r.Body.String(), "message").String())
+		assert.Equal(t, "partial", gjson.Get(r.Body.String(), "status").String())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "successCount").Int())
+		assert.Equal(t, int64(1), gjson.Get(r.Body.String(), "failCount").Int())
+		items := gjson.Get(r.Body.String(), "items").Array()
+		require.Len(t, items, 2)
+		itemByUID := make(map[string]gjson.Result)
+		for _, item := range items {
+			itemByUID[item.Get("id").String()] = item
+		}
+		assert.True(t, itemByUID[archived.PhotoUID].Get("ok").Bool())
+		assert.False(t, itemByUID[visible.PhotoUID].Get("ok").Bool())
+		assert.Contains(t, itemByUID[visible.PhotoUID].Get("error").String(), "not in the archive")
 
 		assert.False(t, batchDeleteTestPhotoExists(t, archived))
 		assert.NoFileExists(t, archivedFile)
@@ -484,6 +701,8 @@ func TestBatchPhotosDelete(t *testing.T) {
 		r := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/delete", fmt.Sprintf(`{"photos": [%q, %q]}`, photo1.PhotoUID, photo2.PhotoUID))
 		assert.Equal(t, http.StatusOK, r.Code)
 		assert.Equal(t, i18n.Msg(i18n.MsgPermanentlyDeleted), gjson.Get(r.Body.String(), "message").String())
+		assert.Equal(t, "success", gjson.Get(r.Body.String(), "status").String())
+		assert.Equal(t, int64(2), gjson.Get(r.Body.String(), "successCount").Int())
 
 		assert.False(t, batchDeleteTestPhotoExists(t, photo1))
 		assert.False(t, batchDeleteTestPhotoExists(t, photo2))
@@ -568,11 +787,18 @@ func TestDeleteArchivedPhotos(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/batch/photos/delete", nil)
 
-		deleted, numFiles := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), selected)
+		builder := batchresult.NewBuilder(restored.PhotoUID, archived.PhotoUID)
+		deleted, numFiles := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), selected, builder, false, false)
+		res := builder.Result()
 
 		require.Len(t, deleted, 1)
 		assert.Equal(t, archived.PhotoUID, deleted[0].PhotoUID)
 		assert.Equal(t, 1, numFiles)
+		assert.Equal(t, batchresult.StatusPartial, res.Status)
+		require.Len(t, res.Items, 2)
+		assert.False(t, res.Items[0].OK)
+		assert.Contains(t, res.Items[0].Error, "not in the archive")
+		assert.True(t, res.Items[1].OK)
 		assert.False(t, batchDeleteTestPhotoExists(t, archived))
 		assert.NoFileExists(t, archivedFile)
 		assertBatchDeleteTestPhotoKept(t, restored, restoredFile)
@@ -606,10 +832,15 @@ func TestDeleteArchivedPhotos(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/batch/photos/delete", nil)
 
-		deleted, _ := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), selected)
+		builder := batchresult.NewBuilder(renamed.PhotoUID)
+		deleted, _ := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), selected, builder, false, false)
+		res := builder.Result()
 
 		require.Len(t, deleted, 1)
 		assert.Equal(t, "renamed", deleted[0].PhotoName)
+		assert.Equal(t, batchresult.StatusSuccess, res.Status)
+		require.Len(t, res.Items, 1)
+		assert.True(t, res.Items[0].OK)
 
 		// The audit entry names the path of the photo that is deleted.
 		var audited []string
@@ -639,13 +870,18 @@ func TestDeleteArchivedPhotos(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/batch/photos/delete", nil)
 
-		deleted, numFiles := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), selected)
+		builder := batchresult.NewBuilder(removed.PhotoUID)
+		deleted, numFiles := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), selected, builder, false, false)
+		res := builder.Result()
 
 		assert.Empty(t, deleted)
 		assert.Equal(t, 0, numFiles)
+		assert.Equal(t, batchresult.StatusFailed, res.Status)
+		require.Len(t, res.Items, 1)
+		assert.False(t, res.Items[0].OK)
 		assertBatchDeleteTestPhotoKept(t, removed, removedFile)
 	})
-	t.Run("ReadError", func(t *testing.T) {
+	t.Run("ReadErrorContinues", func(t *testing.T) {
 		_, _, conf := NewApiTest()
 		folder := batchDeleteTestFolder(t, conf)
 		first, firstFile := batchDeleteTestPhoto(t, conf, folder, "first")
@@ -653,7 +889,7 @@ func TestDeleteArchivedPhotos(t *testing.T) {
 		require.NoError(t, first.Archive())
 		require.NoError(t, second.Archive())
 
-		// Fail reading the first photo; the second must not be reached either.
+		// Continue mode reaches both photos and reports both failures.
 		calls := 0
 		orig := archivedPhoto
 		archivedPhoto = func(id uint) (*entity.Photo, error) {
@@ -665,18 +901,138 @@ func TestDeleteArchivedPhotos(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/batch/photos/delete", nil)
 
-		deleted, numFiles := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), entity.Photos{first, second})
+		builder := batchresult.NewBuilder(first.PhotoUID, second.PhotoUID)
+		deleted, numFiles := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), entity.Photos{first, second}, builder, false, false)
+		res := builder.Result()
+
+		assert.Empty(t, deleted)
+		assert.Equal(t, 0, numFiles)
+		assert.Equal(t, 2, calls)
+		assert.Equal(t, batchresult.StatusFailed, res.Status)
+		assert.False(t, res.Stopped)
+		assertBatchDeleteTestPhotoKept(t, first, firstFile)
+		assertBatchDeleteTestPhotoKept(t, second, secondFile)
+	})
+	t.Run("ReadErrorStops", func(t *testing.T) {
+		_, _, conf := NewApiTest()
+		folder := batchDeleteTestFolder(t, conf)
+		first, firstFile := batchDeleteTestPhoto(t, conf, folder, "first")
+		second, secondFile := batchDeleteTestPhoto(t, conf, folder, "second")
+		require.NoError(t, first.Archive())
+		require.NoError(t, second.Archive())
+
+		// Fail reading the first photo; fail-fast mode must not reach the second one.
+		calls := 0
+		orig := archivedPhoto
+		archivedPhoto = func(id uint) (*entity.Photo, error) {
+			calls++
+			return nil, errors.New("read failed")
+		}
+		t.Cleanup(func() { archivedPhoto = orig })
+
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/batch/photos/delete", nil)
+
+		builder := batchresult.NewBuilder(first.PhotoUID, second.PhotoUID)
+		deleted, numFiles := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), entity.Photos{first, second}, builder, true, false)
+		res := builder.Result()
 
 		assert.Empty(t, deleted)
 		assert.Equal(t, 0, numFiles)
 		assert.Equal(t, 1, calls)
+		assert.True(t, res.Stopped)
+		require.Len(t, res.Items, 2)
+		assert.Contains(t, res.Items[0].Error, "read failed")
+		assert.Contains(t, res.Items[1].Error, "stopped")
 		assertBatchDeleteTestPhotoKept(t, first, firstFile)
 		assertBatchDeleteTestPhotoKept(t, second, secondFile)
 	})
 	t.Run("Empty", func(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		deleted, numFiles := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), nil)
+		builder := batchresult.NewBuilder()
+		deleted, numFiles := deleteArchivedPhotos(c, entity.SessionFixtures.Pointer("alice"), nil, builder, false, false)
 		assert.Empty(t, deleted)
 		assert.Equal(t, 0, numFiles)
+		assert.Equal(t, batchresult.StatusSuccess, builder.Result().Status)
 	})
+}
+
+// TestBatchPhotosConcurrentConflict forces an archive and a restore batch on the same photo to
+// overlap so that restore commits after the archive write but before the archive verification.
+// The archive details must then report the conflict rather than claiming success.
+func TestBatchPhotosConcurrentConflict(t *testing.T) {
+	uid := "ps6sg6be2lvl0yh7"
+
+	require.NoError(t, entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+		UpdateColumns(entity.Values{"deleted_at": nil, "photo_quality": 3}).Error)
+	t.Cleanup(func() {
+		_ = entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", uid).
+			UpdateColumn("deleted_at", nil).Error
+	})
+
+	app, router, _ := NewApiTest()
+	BatchPhotosArchive(router)
+	BatchPhotosRestore(router)
+
+	releaseArchive := make(chan struct{})
+
+	var calls int32
+
+	origStates := loadPhotoBatchStatesFunc
+	loadPhotoBatchStatesFunc = func(uids []string) (map[string]photoBatchState, error) {
+		n := atomic.AddInt32(&calls, 1)
+
+		if n == 1 {
+			// Archive verification waits until the concurrent restore committed.
+			<-releaseArchive
+		}
+
+		states, err := loadPhotoBatchStates(uids)
+
+		if n == 2 {
+			// Release the archive verification only after the restore state was read.
+			close(releaseArchive)
+		}
+
+		return states, err
+	}
+	t.Cleanup(func() { loadPhotoBatchStatesFunc = origStates })
+
+	var archiveResp *httptest.ResponseRecorder
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		archiveResp = PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/archive",
+			fmt.Sprintf(`{"photos": [%q]}`, uid))
+	}()
+
+	// Start the restore only after the archive write has committed but while its verification waits.
+	require.Eventually(t, func() bool {
+		states, stateErr := loadPhotoBatchStates([]string{uid})
+		return stateErr == nil && states[uid].DeletedAt.Valid
+	}, 5*time.Second, 5*time.Millisecond)
+
+	restoreResp := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/restore",
+		fmt.Sprintf(`{"photos": [%q]}`, uid))
+	wg.Wait()
+
+	// Restore took effect; its details report success.
+	assert.Equal(t, http.StatusOK, restoreResp.Code)
+	assert.Equal(t, batchresult.StatusSuccess, gjson.Get(restoreResp.Body.String(), "status").String())
+	assert.True(t, gjson.Get(restoreResp.Body.String(), "items.0.ok").Bool())
+
+	// Archive verification happened after restore committed, so it must report a conflict.
+	require.NotNil(t, archiveResp)
+	assert.Equal(t, http.StatusOK, archiveResp.Code)
+	assert.Equal(t, batchresult.StatusFailed, gjson.Get(archiveResp.Body.String(), "status").String())
+	assert.False(t, gjson.Get(archiveResp.Body.String(), "items.0.ok").Bool())
+	assert.Contains(t, gjson.Get(archiveResp.Body.String(), "items.0.error").String(), "concurrent")
+
+	var state entity.Photo
+	require.NoError(t, entity.UnscopedDb().Where("photo_uid = ?", uid).First(&state).Error)
+	assert.False(t, state.DeletedAt.Valid)
 }

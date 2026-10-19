@@ -8,12 +8,14 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/query"
 	"github.com/photoprism/photoprism/internal/event"
+	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/i18n"
 )
@@ -1022,5 +1024,79 @@ func TestBatchPhotosEdit(t *testing.T) {
 		case <-time.After(200 * time.Millisecond):
 			// expected: nothing saved, nothing published.
 		}
+	})
+	t.Run("PerItemResultsPartial", func(t *testing.T) {
+		app, router, _ := NewApiTest()
+		BatchPhotosEdit(router)
+
+		photoUID := "pqkm36fjqvset9uy"
+		var photo entity.Photo
+		require.NoError(t, entity.UnscopedDb().Where("photo_uid = ?", photoUID).First(&photo).Error)
+		t.Cleanup(func() {
+			_ = entity.UnscopedDb().Model(&entity.Photo{}).Where("photo_uid = ?", photoUID).
+				UpdateColumns(entity.Values{"photo_favorite": photo.PhotoFavorite}).Error
+		})
+
+		body := fmt.Sprintf(`{"photos": [%q, %q], "values": {"Favorite": {"value": true, "action": "update"}}}`, photoUID, "ps6sg6be2lvl0missing")
+		resp := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/edit", body)
+		require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+
+		payload := resp.Body.String()
+		assert.Equal(t, "partial", gjson.Get(payload, "status").String())
+		assert.Equal(t, int64(1), gjson.Get(payload, "successCount").Int())
+		assert.Equal(t, int64(1), gjson.Get(payload, "failCount").Int())
+		items := gjson.Get(payload, "items").Array()
+		require.Len(t, items, 2)
+		assert.Equal(t, photoUID, items[0].Get("id").String())
+		assert.True(t, items[0].Get("ok").Bool())
+		assert.Equal(t, "ps6sg6be2lvl0missing", items[1].Get("id").String())
+		assert.False(t, items[1].Get("ok").Bool())
+		assert.Contains(t, items[1].Get("error").String(), "not found")
+
+		var updated entity.Photo
+		require.NoError(t, entity.UnscopedDb().Where("photo_uid = ?", photoUID).First(&updated).Error)
+		assert.True(t, updated.PhotoFavorite)
+	})
+	t.Run("LoadResponseOmitsBatchResult", func(t *testing.T) {
+		app, router, _ := NewApiTest()
+		BatchPhotosEdit(router)
+
+		resp := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/edit",
+			`{"photos": ["pqkm36fjqvset9uy"]}`)
+		require.Equal(t, http.StatusOK, resp.Code)
+
+		// Old clients keep the models/values-only payload on read-only requests.
+		assert.False(t, gjson.Get(resp.Body.String(), "status").Exists())
+		assert.False(t, gjson.Get(resp.Body.String(), "items").Exists())
+		assert.False(t, gjson.Get(resp.Body.String(), "successCount").Exists())
+	})
+	t.Run("BusyReportsAllItemsFailed", func(t *testing.T) {
+		require.NoError(t, mutex.BatchEdit.Start())
+		t.Cleanup(mutex.BatchEdit.Stop)
+
+		app, router, _ := NewApiTest()
+		BatchPhotosEdit(router)
+
+		body := `{"photos": ["pqkm36fjqvset9uy", "pqkm36fjqvset9uz"], "values": {"Favorite": {"value": true, "action": "update"}}}`
+		resp := PerformRequestWithBody(app, "POST", "/api/v1/batch/photos/edit", body)
+
+		assert.Equal(t, http.StatusTooManyRequests, resp.Code)
+		payload := resp.Body.String()
+		assert.Equal(t, "failed", gjson.Get(payload, "status").String())
+		assert.Equal(t, int64(0), gjson.Get(payload, "successCount").Int())
+		assert.Equal(t, int64(2), gjson.Get(payload, "failCount").Int())
+		items := gjson.Get(payload, "items").Array()
+		require.Len(t, items, 2)
+		for _, item := range items {
+			assert.False(t, item.Get("ok").Bool())
+			assert.NotEmpty(t, item.Get("error").String())
+		}
+
+		// Nothing changed while the other batch was running.
+		var count int64
+		entity.UnscopedDb().Model(&entity.Photo{}).
+			Where("photo_uid IN (?) AND photo_favorite = TRUE", []string{"pqkm36fjqvset9uy", "pqkm36fjqvset9uz"}).
+			Count(&count)
+		assert.Equal(t, int64(0), count)
 	})
 }

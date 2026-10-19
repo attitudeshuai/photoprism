@@ -3,8 +3,10 @@ package batch
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/photoprism/photoprism/internal/batchresult"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/query"
 	"github.com/photoprism/photoprism/internal/entity/search"
@@ -25,6 +27,9 @@ type PhotoSaveRequest struct {
 type SaveBatchResult struct {
 	Requests     []*PhotoSaveRequest
 	Results      []bool
+	ItemErrs     []error
+	Failures     map[string]error
+	Stopped      bool
 	Preloaded    map[string]*entity.Photo
 	UpdatedCount int
 	SavedAny     bool
@@ -64,9 +69,11 @@ func NewPhotoSaveRequest(photo *entity.Photo, values *PhotosForm) (*PhotoSaveReq
 // PreparePhotoSaveRequests converts the given selection into save requests, ensuring each photo
 // entity is hydrated and album/label actions are applied once per selection. The returned map is
 // the (possibly newly populated) preloaded set so callers can reuse it for response rendering.
-func PreparePhotoSaveRequests(photos search.PhotoResults, preloaded map[string]*entity.Photo, values *PhotosForm) ([]*PhotoSaveRequest, map[string]*entity.Photo, MutationStats) {
+// Failures returns the per-UID errors for photos that could not be loaded or whose album/label
+// mutations could not be applied; entries stay in selection order via the caller's request list.
+func PreparePhotoSaveRequests(photos search.PhotoResults, preloaded map[string]*entity.Photo, values *PhotosForm) (requests []*PhotoSaveRequest, result map[string]*entity.Photo, stats MutationStats, failures map[string]error) {
 	if values == nil {
-		return nil, preloaded, MutationStats{}
+		return nil, preloaded, MutationStats{}, nil
 	}
 
 	// Pre-create any album/label add targets so Apply* can reuse resolved UIDs per photo.
@@ -78,8 +85,22 @@ func PreparePhotoSaveRequests(photos search.PhotoResults, preloaded map[string]*
 
 	log.Infof("batch: updating %d photos", len(photos))
 
-	saveRequests := make([]*PhotoSaveRequest, 0, len(photos))
-	stats := MutationStats{}
+	requests = make([]*PhotoSaveRequest, 0, len(photos))
+	stats = MutationStats{}
+	failures = make(map[string]error)
+
+	// fail records the first error for a photo; album/label errors are joined with later causes.
+	fail := func(uid string, err error) {
+		if err == nil {
+			return
+		}
+
+		if prev, ok := failures[uid]; ok {
+			failures[uid] = fmt.Errorf("%w; %s", prev, err)
+		} else {
+			failures[uid] = err
+		}
+	}
 
 	for _, result := range photos {
 		photoID := result.PhotoUID
@@ -94,6 +115,7 @@ func PreparePhotoSaveRequests(photos search.PhotoResults, preloaded map[string]*
 			loaded, err := query.PhotoPreloadByUID(photoID)
 			if err != nil {
 				log.Errorf("batch: failed to load photo %s: %s", photoID, err)
+				fail(photoID, fmt.Errorf("%s: %w", photoID, batchresult.ErrNotFound))
 				continue
 			}
 			fullPhoto = &loaded
@@ -104,15 +126,17 @@ func PreparePhotoSaveRequests(photos search.PhotoResults, preloaded map[string]*
 
 		if err != nil {
 			log.Errorf("batch: failed to build save request for photo %s: %s", photoID, err)
+			fail(photoID, err)
 			continue
 		}
 
-		saveRequests = append(saveRequests, saveReq)
+		requests = append(requests, saveReq)
 
 		if values.Albums.Action == ActionUpdate {
 			if errs := ApplyAlbums(fullPhoto, values.Albums); errs != nil {
 				log.Errorf("batch: failed to update albums for photo %s: (%s)", photoID, errs)
 				stats.AlbumErrors += len(errs)
+				fail(photoID, fmt.Errorf("albums: %s", joinErrors(errs)))
 			}
 
 			if len(values.Albums.Items) > 0 {
@@ -124,6 +148,7 @@ func PreparePhotoSaveRequests(photos search.PhotoResults, preloaded map[string]*
 			if errs := ApplyLabels(fullPhoto, values.Labels); errs != nil {
 				log.Errorf("batch: failed to update labels for photo %s (%s)", photoID, errs)
 				stats.LabelErrors += len(errs)
+				fail(photoID, fmt.Errorf("labels: %s", joinErrors(errs)))
 			}
 
 			if len(values.Labels.Items) > 0 {
@@ -132,13 +157,31 @@ func PreparePhotoSaveRequests(photos search.PhotoResults, preloaded map[string]*
 		}
 	}
 
-	return saveRequests, preloaded, stats
+	if len(failures) == 0 {
+		failures = nil
+	}
+
+	return requests, preloaded, stats, failures
+}
+
+// joinErrors formats multiple errors as one readable failure reason.
+func joinErrors(errs []error) string {
+	parts := make([]string, 0, len(errs))
+
+	for _, err := range errs {
+		if err != nil {
+			parts = append(parts, err.Error())
+		}
+	}
+
+	return strings.Join(parts, "; ")
 }
 
 // PrepareAndSavePhotos hydrates the photo selection, applies album/label mutations, builds save
 // requests, and persists the changes in one step. It returns a SaveBatchResult so callers can run
-// follow-up work (events, cache flushes) without re-querying state.
-func PrepareAndSavePhotos(photos search.PhotoResults, preloaded map[string]*entity.Photo, values *PhotosForm) (*SaveBatchResult, error) {
+// follow-up work (events, cache flushes) without re-querying state. When stopOnError is true, the
+// first failed photo ends the batch and all following items are reported as not processed.
+func PrepareAndSavePhotos(photos search.PhotoResults, preloaded map[string]*entity.Photo, values *PhotosForm, stopOnError bool) (*SaveBatchResult, error) {
 	start := time.Now()
 	result := &SaveBatchResult{Preloaded: preloaded}
 
@@ -158,23 +201,26 @@ func PrepareAndSavePhotos(photos search.PhotoResults, preloaded map[string]*enti
 	// Prevent concurrent metadata worker runs while batch updates are being applied.
 	mutex.MetaWorker.Cancel()
 
-	requests, preloaded, mutationStats := PreparePhotoSaveRequests(photos, result.Preloaded, values)
+	requests, preloaded, mutationStats, failures := PreparePhotoSaveRequests(photos, result.Preloaded, values)
 
 	result.Requests = requests
 	result.Preloaded = preloaded
 	result.Stats = mutationStats
+	result.Failures = failures
 
 	if len(requests) == 0 {
 		return result, nil
 	}
 
-	saveResults, err := SavePhotos(requests)
+	saveResults, itemErrs, stopped, err := SavePhotos(requests, stopOnError)
 
 	if err != nil {
 		return nil, err
 	}
 
 	result.Results = saveResults
+	result.ItemErrs = itemErrs
+	result.Stopped = stopped
 
 	for i, saved := range saveResults {
 		if saved {
@@ -256,23 +302,87 @@ func batchChangesTime(values *PhotosForm) bool {
 	return batchChangesDate(values) || (values != nil && values.TimeZone.Action == ActionUpdate)
 }
 
+// ItemResults builds the per-item outcome for all requested photo UIDs in first-seen order so
+// handlers can return the shared batchresult structure without re-walking the selection.
+func (r *SaveBatchResult) ItemResults(requested []string) *batchresult.Result {
+	builder := batchresult.NewBuilder(requested...)
+
+	byUID := make(map[string]int, len(r.Requests))
+
+	for i, req := range r.Requests {
+		if req != nil && req.Photo != nil && req.Photo.PhotoUID != "" {
+			byUID[req.Photo.PhotoUID] = i
+		}
+	}
+
+	// In fail-fast mode, SavePhotos stops after the first save error; requests past it were never run.
+	firstErr := -1
+
+	if r.Stopped {
+		for i, itemErr := range r.ItemErrs {
+			if itemErr != nil {
+				firstErr = i
+				break
+			}
+		}
+	}
+
+	for _, uid := range builder.IDs() {
+		switch i, found := byUID[uid]; {
+		case found && r.ItemErrs != nil && r.ItemErrs[i] != nil:
+			builder.Failure(uid, r.ItemErrs[i])
+		case found && r.Stopped && firstErr >= 0 && i > firstErr:
+			builder.Failure(uid, batchresult.ErrStopped)
+		case found && r.Failures != nil && r.Failures[uid] != nil:
+			builder.Failure(uid, r.Failures[uid])
+		case found:
+			// A no-op save (saved=false) means the requested state already holds.
+			builder.Success(uid)
+		case r.Failures != nil && r.Failures[uid] != nil:
+			builder.Failure(uid, r.Failures[uid])
+		case r.Stopped:
+			builder.Failure(uid, batchresult.ErrStopped)
+		default:
+			builder.Failure(uid, batchresult.ErrNotFound)
+		}
+	}
+
+	res := builder.Result()
+
+	if r.Stopped {
+		res.Stopped = true
+	}
+
+	return res
+}
+
 // SavePhotos persists the batch updates described by the provided requests while skipping the
 // heavyweight per-photo maintenance performed by entity.SavePhotoForm. It only updates the
 // columns that actually changed, flags the photo for background metadata refresh by clearing
-// CheckedAt, and updates the shared counts once per batch instead of once per photo.
-func SavePhotos(requests []*PhotoSaveRequest) ([]bool, error) {
-	results := make([]bool, len(requests))
+// CheckedAt, and updates the shared counts once per batch instead of once per photo. When
+// stopOnError is false, save errors are collected per request and the remaining photos are
+// processed; when true, the first save error ends the batch and stopped reports this.
+func SavePhotos(requests []*PhotoSaveRequest, stopOnError bool) (results []bool, itemErrs []error, stopped bool, err error) {
+	results = make([]bool, len(requests))
+	itemErrs = make([]error, len(requests))
 	anySaved := false
 
 	for i, req := range requests {
 		if mutex.BatchEdit.Canceled() {
-			return results, ErrBatchEditCanceled
+			return results, itemErrs, stopped, ErrBatchEditCanceled
 		}
 
-		saved, err := savePhoto(req)
+		saved, saveErr := savePhoto(req)
 
-		if err != nil {
-			return results, err
+		if saveErr != nil {
+			itemErrs[i] = saveErr
+
+			if stopOnError {
+				stopped = true
+				break
+			}
+
+			continue
 		}
 
 		results[i] = saved
@@ -286,5 +396,5 @@ func SavePhotos(requests []*PhotoSaveRequest) ([]bool, error) {
 		entity.UpdateCountsAsync()
 	}
 
-	return results, nil
+	return results, itemErrs, stopped, nil
 }

@@ -1,6 +1,7 @@
 package batch
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestSavePhotos(t *testing.T) {
 		req, err := NewPhotoSaveRequest(photo, values)
 		require.NoError(t, err)
 
-		results, err := SavePhotos([]*PhotoSaveRequest{req})
+		results, _, _, err := SavePhotos([]*PhotoSaveRequest{req}, false)
 		require.NoError(t, err)
 		require.Len(t, results, 1)
 		assert.True(t, results[0])
@@ -78,7 +79,7 @@ func TestSavePhotos(t *testing.T) {
 		req, err := NewPhotoSaveRequest(photo, values)
 		require.NoError(t, err)
 
-		results, err := SavePhotos([]*PhotoSaveRequest{req})
+		results, _, _, err := SavePhotos([]*PhotoSaveRequest{req}, false)
 		require.NoError(t, err)
 		require.Len(t, results, 1)
 		assert.True(t, results[0])
@@ -135,7 +136,7 @@ func TestSavePhotos(t *testing.T) {
 		}
 		setReq, err := NewPhotoSaveRequest(photo, setValues)
 		require.NoError(t, err)
-		_, err = SavePhotos([]*PhotoSaveRequest{setReq})
+		_, _, _, err = SavePhotos([]*PhotoSaveRequest{setReq}, false)
 		require.NoError(t, err)
 
 		removeValues := &PhotosForm{
@@ -152,7 +153,7 @@ func TestSavePhotos(t *testing.T) {
 		}
 		removeReq, err := NewPhotoSaveRequest(photo, removeValues)
 		require.NoError(t, err)
-		results, err := SavePhotos([]*PhotoSaveRequest{removeReq})
+		results, _, _, err := SavePhotos([]*PhotoSaveRequest{removeReq}, false)
 		require.NoError(t, err)
 		require.Len(t, results, 1)
 		assert.True(t, results[0])
@@ -249,38 +250,41 @@ func TestNewPhotoSaveRequest(t *testing.T) {
 func TestPreparePhotoSaveRequests(t *testing.T) {
 	t.Run("NilValues", func(t *testing.T) {
 		preloaded := map[string]*entity.Photo{}
-		requests, updated, stats := PreparePhotoSaveRequests(nil, preloaded, nil)
+		requests, updated, stats, failures := PreparePhotoSaveRequests(nil, preloaded, nil)
 		assert.Nil(t, requests)
 		assert.Equal(t, preloaded, updated)
 		assert.Equal(t, MutationStats{}, stats)
+		assert.Nil(t, failures)
 	})
 	t.Run("LoadsMissingPhoto", func(t *testing.T) {
 		fixture := entity.PhotoFixtures.Get("Photo01")
 		values := &PhotosForm{PhotoTitle: String{Value: "Prepared", Action: ActionUpdate}}
 		photos := search.PhotoResults{{PhotoUID: fixture.PhotoUID}}
 
-		requests, updated, stats := PreparePhotoSaveRequests(photos, nil, values)
+		requests, updated, stats, failures := PreparePhotoSaveRequests(photos, nil, values)
 		require.Len(t, requests, 1)
 		assert.NotNil(t, requests[0].Photo)
 		assert.Equal(t, "Prepared", requests[0].Form.PhotoTitle)
 		assert.Contains(t, updated, fixture.PhotoUID)
 		assert.Equal(t, MutationStats{}, stats)
+		assert.Nil(t, failures)
 	})
 	t.Run("SkipsMissing", func(t *testing.T) {
 		values := &PhotosForm{PhotoTitle: String{Value: "Prepared", Action: ActionUpdate}}
 		photos := search.PhotoResults{{PhotoUID: "pt_does_not_exist"}}
 
-		requests, updated, stats := PreparePhotoSaveRequests(photos, nil, values)
+		requests, updated, stats, failures := PreparePhotoSaveRequests(photos, nil, values)
 		assert.Len(t, requests, 0)
 		assert.Empty(t, updated)
 		assert.Equal(t, MutationStats{}, stats)
+		require.Contains(t, failures, "pt_does_not_exist")
 	})
 }
 
 // TestPrepareAndSavePhotos verifies the full helper workflow.
 func TestPrepareAndSavePhotos(t *testing.T) {
 	t.Run("NilValues", func(t *testing.T) {
-		result, err := PrepareAndSavePhotos(nil, nil, nil)
+		result, err := PrepareAndSavePhotos(nil, nil, nil, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.NotNil(t, result.Preloaded)
@@ -299,7 +303,7 @@ func TestPrepareAndSavePhotos(t *testing.T) {
 		}
 		photos := search.PhotoResults{{PhotoUID: fixture.PhotoUID}}
 
-		result, err := PrepareAndSavePhotos(photos, nil, values)
+		result, err := PrepareAndSavePhotos(photos, nil, values, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.Len(t, result.Requests, 1)
@@ -351,7 +355,7 @@ func TestPrepareAndSavePhotos(t *testing.T) {
 		values := &PhotosForm{PhotoYear: Int{Value: newYear, Action: ActionUpdate}}
 		photos := search.PhotoResults{{PhotoUID: photo.PhotoUID}}
 
-		result, err := PrepareAndSavePhotos(photos, nil, values)
+		result, err := PrepareAndSavePhotos(photos, nil, values, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.True(t, result.SavedAny)
@@ -369,7 +373,7 @@ func TestPrepareAndSavePhotos(t *testing.T) {
 		require.NoError(t, mutex.BatchEdit.Start())
 		defer mutex.BatchEdit.Stop()
 
-		result, err := PrepareAndSavePhotos(search.PhotoResults{}, nil, &PhotosForm{})
+		result, err := PrepareAndSavePhotos(search.PhotoResults{}, nil, &PhotosForm{}, false)
 		assert.Nil(t, result)
 		assert.ErrorIs(t, err, ErrBatchEditBusy)
 	})
@@ -377,7 +381,7 @@ func TestPrepareAndSavePhotos(t *testing.T) {
 		require.NoError(t, mutex.MetaWorker.Start())
 		t.Cleanup(func() { mutex.MetaWorker.Stop() })
 
-		result, err := PrepareAndSavePhotos(search.PhotoResults{}, nil, &PhotosForm{})
+		result, err := PrepareAndSavePhotos(search.PhotoResults{}, nil, &PhotosForm{}, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
@@ -400,10 +404,143 @@ func TestPrepareAndSavePhotos(t *testing.T) {
 
 		mutex.BatchEdit.Cancel()
 
-		results, err := SavePhotos([]*PhotoSaveRequest{req})
+		results, itemErrs, stopped, err := SavePhotos([]*PhotoSaveRequest{req}, false)
 		assert.ErrorIs(t, err, ErrBatchEditCanceled)
 		assert.Len(t, results, 1)
+		assert.Len(t, itemErrs, 1)
+		assert.False(t, stopped)
 		assert.False(t, results[0])
+	})
+}
+
+// TestSavePhotosStopOnError verifies that fail-fast mode leaves later requests untouched.
+func TestSavePhotosStopOnError(t *testing.T) {
+	t.Run("StopsAfterFirstError", func(t *testing.T) {
+		fixture := entity.PhotoFixtures.Get("Photo01")
+		photo := entity.FindPhoto(entity.Photo{PhotoUID: fixture.PhotoUID})
+		require.NotNil(t, photo)
+
+		values := &PhotosForm{PhotoTitle: String{Value: "Stop On Error", Action: ActionUpdate}}
+		req, err := NewPhotoSaveRequest(photo, values)
+		require.NoError(t, err)
+
+		// An invalid request fails saving without touching the database.
+		badReq := &PhotoSaveRequest{Photo: &entity.Photo{}, Form: nil, Values: values}
+
+		results, itemErrs, stopped, err := SavePhotos([]*PhotoSaveRequest{badReq, req}, true)
+		require.NoError(t, err)
+		assert.True(t, stopped)
+		require.Len(t, results, 2)
+		require.Len(t, itemErrs, 2)
+		assert.Error(t, itemErrs[0])
+		assert.Nil(t, itemErrs[1], "remaining request must not be processed in fail-fast mode")
+		assert.False(t, results[1])
+
+		// The valid photo must remain unchanged.
+		current := entity.FindPhoto(entity.Photo{PhotoUID: fixture.PhotoUID})
+		require.NotNil(t, current)
+		assert.NotEqual(t, "Stop On Error", current.PhotoTitle)
+	})
+}
+
+// TestSaveBatchItemResults covers the per-item result assembly, including not-found items,
+// no-op saves, save errors, and fail-fast leftovers.
+func TestSaveBatchItemResults(t *testing.T) {
+	t.Run("AllSucceededWithNoOp", func(t *testing.T) {
+		fixture := entity.PhotoFixtures.Get("Photo01")
+		photo := entity.FindPhoto(entity.Photo{PhotoUID: fixture.PhotoUID})
+		require.NotNil(t, photo)
+
+		r := &SaveBatchResult{
+			Requests: []*PhotoSaveRequest{{Photo: photo}},
+			Results:  []bool{false},
+			ItemErrs: []error{nil},
+		}
+
+		res := r.ItemResults([]string{fixture.PhotoUID})
+		assert.Equal(t, "success", res.Status)
+		require.Len(t, res.Items, 1)
+		assert.True(t, res.Items[0].OK)
+	})
+	t.Run("NotFoundAndSaveError", func(t *testing.T) {
+		fixture := entity.PhotoFixtures.Get("Photo02")
+		photo := entity.FindPhoto(entity.Photo{PhotoUID: fixture.PhotoUID})
+		require.NotNil(t, photo)
+
+		r := &SaveBatchResult{
+			Requests: []*PhotoSaveRequest{{Photo: photo}},
+			Results:  []bool{false},
+			ItemErrs: []error{errors.New("disk full")},
+		}
+
+		res := r.ItemResults([]string{fixture.PhotoUID, "ps_missing"})
+		assert.Equal(t, "failed", res.Status)
+		require.Len(t, res.Items, 2)
+		assert.False(t, res.Items[0].OK)
+		assert.Contains(t, res.Items[0].Error, "disk full")
+		assert.False(t, res.Items[1].OK)
+		assert.Contains(t, res.Items[1].Error, "not found")
+	})
+	t.Run("PartialNotFound", func(t *testing.T) {
+		fixture := entity.PhotoFixtures.Get("Photo02")
+		photo := entity.FindPhoto(entity.Photo{PhotoUID: fixture.PhotoUID})
+		require.NotNil(t, photo)
+
+		r := &SaveBatchResult{
+			Requests: []*PhotoSaveRequest{{Photo: photo}},
+			Results:  []bool{false},
+			ItemErrs: []error{nil},
+		}
+
+		res := r.ItemResults([]string{fixture.PhotoUID, "ps_missing"})
+		assert.Equal(t, "partial", res.Status)
+		assert.Equal(t, 1, res.SuccessCount)
+		assert.Equal(t, 1, res.FailCount)
+		require.Len(t, res.Items, 2)
+		assert.True(t, res.Items[0].OK)
+		assert.False(t, res.Items[1].OK)
+		assert.Contains(t, res.Items[1].Error, "not found")
+	})
+	t.Run("PreparationFailure", func(t *testing.T) {
+		fixture := entity.PhotoFixtures.Get("Photo03")
+		photo := entity.FindPhoto(entity.Photo{PhotoUID: fixture.PhotoUID})
+		require.NotNil(t, photo)
+
+		r := &SaveBatchResult{
+			Requests: []*PhotoSaveRequest{{Photo: photo}},
+			Results:  []bool{true},
+			ItemErrs: []error{nil},
+			Failures: map[string]error{fixture.PhotoUID: errors.New("labels: invalid label uid format: x")},
+		}
+
+		res := r.ItemResults([]string{fixture.PhotoUID})
+		assert.Equal(t, "failed", res.Status)
+		require.Len(t, res.Items, 1)
+		assert.False(t, res.Items[0].OK)
+		assert.Contains(t, res.Items[0].Error, "labels")
+	})
+	t.Run("StoppedMarksRemaining", func(t *testing.T) {
+		f1 := entity.PhotoFixtures.Get("Photo01")
+		f2 := entity.PhotoFixtures.Get("Photo02")
+		p1 := entity.FindPhoto(entity.Photo{PhotoUID: f1.PhotoUID})
+		p2 := entity.FindPhoto(entity.Photo{PhotoUID: f2.PhotoUID})
+		require.NotNil(t, p1)
+		require.NotNil(t, p2)
+
+		r := &SaveBatchResult{
+			Requests: []*PhotoSaveRequest{{Photo: p1}, {Photo: p2}},
+			Results:  []bool{false, false},
+			ItemErrs: []error{errors.New("save failed"), nil},
+			Stopped:  true,
+		}
+
+		res := r.ItemResults([]string{f1.PhotoUID, f2.PhotoUID, "ps_missing"})
+		assert.True(t, res.Stopped)
+		assert.Equal(t, "failed", res.Status)
+		require.Len(t, res.Items, 3)
+		assert.Contains(t, res.Items[0].Error, "save failed")
+		assert.Contains(t, res.Items[1].Error, "stopped")
+		assert.Contains(t, res.Items[2].Error, "stopped")
 	})
 }
 
