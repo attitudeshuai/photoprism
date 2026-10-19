@@ -145,6 +145,10 @@ func (w *Thumbs) Dir(dir string, force bool) (fs.Done, error) {
 
 		relativeName := mf.RelName(dir)
 
+		// Register the pending sizes before handing the job over, so a run that is
+		// canceled while this file is queued or in progress still leaves a to-do record.
+		registerPendingThumbs(mf)
+
 		event.Publish("index.thumbnails", event.Data{
 			"fileName": relativeName,
 			"baseName": filepath.Base(relativeName),

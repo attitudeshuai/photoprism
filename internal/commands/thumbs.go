@@ -26,6 +26,11 @@ var ThumbsCommand = &cli.Command{
 			Aliases: []string{"o"},
 			Usage:   "scan originals only, skip sidecar folder",
 		},
+		&cli.BoolFlag{
+			Name:    "pending",
+			Aliases: []string{"p"},
+			Usage:   "generate only the sizes recorded as pending or failed, without scanning folders",
+		},
 	},
 	Action: thumbsAction,
 }
@@ -53,6 +58,24 @@ func thumbsAction(ctx *cli.Context) error {
 
 	force := ctx.Bool("force")
 	originals := ctx.Bool("originals")
+	pending := ctx.Bool("pending")
+
+	w := get.Thumbs()
+
+	// Generate only the sizes recorded as pending or failed, without a folder scan.
+	if pending {
+		log.Infof("generating pending thumbnails only")
+
+		result, pendingErr := w.StartPending()
+		if pendingErr != nil {
+			return pendingErr
+		}
+
+		log.Infof("pending thumbnails processed in %s (%d processed, %d repaired, %d remaining, %d pruned)",
+			time.Since(start), result.Processed, result.Repaired, result.Remaining, result.Pruned)
+
+		return nil
+	}
 
 	var action, done string
 	if force {
@@ -78,9 +101,7 @@ func thumbsAction(ctx *cli.Context) error {
 		}
 	}
 
-	w := get.Thumbs()
-
-	if err = w.Start(dir, ctx.Bool("force"), ctx.Bool("originals")); err != nil {
+	if err = w.Start(dir, force, originals); err != nil {
 		return err
 	}
 

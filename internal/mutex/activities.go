@@ -2,21 +2,23 @@ package mutex
 
 // Activities that can be started and stopped.
 var (
-	IndexWorker  = Activity{}
-	SyncWorker   = Activity{}
-	BackupWorker = Activity{}
-	ShareWorker  = Activity{}
-	MetaWorker   = Activity{}
-	VisionWorker = Activity{}
-	FacesWorker  = Activity{}
-	UpdatePeople = Activity{}
-	BatchEdit    = Activity{}
-	ErrorWorker  = Activity{}
+	IndexWorker         = Activity{}
+	ThumbsPendingWorker = Activity{}
+	SyncWorker          = Activity{}
+	BackupWorker        = Activity{}
+	ShareWorker         = Activity{}
+	MetaWorker          = Activity{}
+	VisionWorker        = Activity{}
+	FacesWorker         = Activity{}
+	UpdatePeople        = Activity{}
+	BatchEdit           = Activity{}
+	ErrorWorker         = Activity{}
 )
 
 // CancelAll requests to stop all activities.
 func CancelAll() {
 	IndexWorker.Cancel()
+	ThumbsPendingWorker.Cancel()
 	SyncWorker.Cancel()
 	BackupWorker.Cancel()
 	ShareWorker.Cancel()

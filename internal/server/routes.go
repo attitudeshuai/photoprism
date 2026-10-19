@@ -103,6 +103,8 @@ func registerRoutes(router *gin.Engine, conf *config.Config) {
 	api.CancelImport(APIv1)
 	api.StartIndexing(APIv1)
 	api.CancelIndexing(APIv1)
+	api.FindPendingThumbs(APIv1)
+	api.StartPendingThumbs(APIv1)
 
 	// Photo Search and Organization.
 	api.SearchPhotos(APIv1)

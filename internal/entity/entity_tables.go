@@ -43,6 +43,7 @@ var Entities = Tables{
 	File{}.TableName():              &File{},
 	FileShare{}.TableName():         &FileShare{},
 	FileSync{}.TableName():          &FileSync{},
+	ThumbStatus{}.TableName():       &ThumbStatus{},
 	Photo{}.TableName():             &Photo{},
 	PhotoUser{}.TableName():         &PhotoUser{},
 	Details{}.TableName():           &Details{},
