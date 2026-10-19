@@ -199,6 +199,11 @@ func (list Tables) Migrate(db *gorm.DB, opt migrate.Options) (err error) {
 	// Run pre migrations, if any.
 	if err := migrate.Run(db, opt.Pre()); err != nil {
 		log.Error(err)
+
+		// Refuse to continue with an interrupted migration instead of working on a partial schema.
+		if errors.Is(err, migrate.ErrInterrupted) {
+			return err
+		}
 	}
 
 	// New MySQL/MariaDB tables get the options of the existing tables, which are checked on every start.
@@ -238,11 +243,21 @@ func (list Tables) Migrate(db *gorm.DB, opt migrate.Options) (err error) {
 	// Run main migrations, if any.
 	if err := migrate.Run(db, opt); err != nil {
 		log.Error(err)
+
+		// Refuse to continue with an interrupted migration instead of working on a partial schema.
+		if errors.Is(err, migrate.ErrInterrupted) {
+			return err
+		}
 	}
 
 	// Run post migrations, if any.
 	if err := migrate.Run(db, opt.Post()); err != nil {
 		log.Error(err)
+
+		// Refuse to continue with an interrupted migration instead of working on a partial schema.
+		if errors.Is(err, migrate.ErrInterrupted) {
+			return err
+		}
 	}
 
 	return nil

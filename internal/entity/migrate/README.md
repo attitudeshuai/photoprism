@@ -1,6 +1,6 @@
 # Database Migrations
 
-**Last Updated:** October 14, 2026
+**Last Updated:** October 15, 2026
 
 This package contains the dialect-specific SQL migrations that complement GORM's schema auto-migration during database initialization. The SQL source files live in [`mysql/`](mysql/) and [`sqlite3/`](sqlite3/), and [`generate.go`](generate.go) embeds them into the generated [`dialect_mysql.go`](dialect_mysql.go) and [`dialect_sqlite3.go`](dialect_sqlite3.go) files. PostgreSQL (experimental) has a registered, empty migration list (`DialectPostgreSQL` in [`dialects.go`](dialects.go)); its schema is created by auto-migration alone.
 
@@ -40,12 +40,18 @@ The `versions` table stores one row per PhotoPrism `Version` and `Edition`; Port
 
 ### `migrations`: Once Per Migration ID
 
-Each SQL migration in this package has a stable timestamp-based `ID`, for example `20240709-000001`. Before running a migration, PhotoPrism looks for an existing row in the `migrations` table.
+Each SQL migration in this package has a stable timestamp-based `ID`, for example `20240709-000001`. Before running a migration, PhotoPrism looks for an existing row in the `migrations` table. Each row records its lifecycle in the `status`, `started_at`, `finished_at`, `error`, `note`, and `progress` columns:
 
-- If `finished_at` is set, the migration already succeeded and is skipped.
-- If `error` is set, the migration previously failed and is skipped during normal startup.
-- If the migration was started but not finished and has been "running" for less than 60 minutes, it is treated as still in progress and is skipped.
-- If the migration was started but not finished and has been "running" for 60 minutes or more, it is treated as stale and may be repeated automatically.
+- `status = finished` means the migration succeeded (`finished_at` is set); it is skipped.
+- `status = failed` means the last attempt failed (`error` is set); it is skipped during normal startup.
+- `status = running` means execution started but never reported back. Rows younger than 60 minutes are assumed to belong to another process that may still be alive, are skipped with a warning, and must not be touched. Rows older than 60 minutes belong to a process that ended and are treated as interrupted.
+- Rows written before the `status` column existed infer their state from the timestamps: a set `finished_at` means finished, a set `error` means failed, and a set `started_at` alone means running.
+
+Interrupted migrations are detected on every startup:
+
+- The migration is **rerun automatically** only when `PHOTOPRISM_MIGRATION_RESUME` is enabled (or `photoprism migrations run --failed` is used) **and** every statement is classified as safe to repeat (`Migration.Reentrant()`). Guarded DDL such as `CREATE ... IF NOT EXISTS`, `DROP ... IF EXISTS`, `CREATE OR REPLACE INDEX`, idempotent `ALTER TABLE` forms, and guarded `UPDATE`/`DELETE` statements qualify; unguarded data changes such as `TRUNCATE` do not.
+- Otherwise startup is **refused**: `migrate.Run` returns `ErrInterrupted`, the schema is not touched further, and the row keeps `status = running` with a `note` that names the migration, its start time, its progress (`n/total` completed statements), and the exact command to continue it. The note makes the interruption visible in `photoprism migrations ls` without comparing schemas by hand.
+- Naming a migration explicitly always continues it, regardless of its age, note, or reentrancy: `photoprism migrations run 20240709-000001`. Both failed and interrupted reruns first reset the row through the same running state, then execute, and end as either finished or failed.
 
 This is the reason broken migrations do not spam the logs on every startup: the failure is recorded once in `migrations.error` and written to the system log, and future runs see that row and skip it unless you explicitly ask to retry it. Errors that only mean the change is already in place, such as an existing column, match `IgnoreErr` in [`errors.go`](errors.go) and count as success.
 
@@ -75,13 +81,14 @@ photoprism migrations ls --tsv
 
 The status output maps to the runtime logic in [`migration.go`](migration.go):
 
-| Status         | Meaning                                                                |
-|----------------|------------------------------------------------------------------------|
-| `OK`           | The migration finished successfully.                                   |
-| `-`            | The migration has not been started yet.                                |
-| `Repeat`       | The migration looks stale and is eligible to run again automatically.  |
-| `Running?`     | The migration started recently and is assumed to still be in progress. |
-| `<error text>` | The last attempt failed and will be skipped on normal startup.         |
+| Status         | Meaning                                                                                                |
+|----------------|--------------------------------------------------------------------------------------------------------|
+| `OK`           | The migration finished successfully.                                                                   |
+| `-`            | The migration has not been started yet.                                                                |
+| `Running?`     | The migration started less than 60 minutes ago and is assumed to still be in progress.                |
+| `Interrupted`  | The running record is older than 60 minutes, so its process ended before the migration finished.      |
+| `<note text>`  | An interrupted migration blocked startup; the note shows its progress and how to continue it manually.|
+| `<error text>` | The last attempt failed and will be skipped on normal startup.                                         |
 
 ### Running Migrations
 
@@ -107,4 +114,8 @@ photoprism migrations run --failed "20240709-000001 20250315-000001"
 
 When you pass a specific ID, PhotoPrism selects only that migration. When you pass multiple IDs, quote them as a single whitespace-separated argument so the CLI can split them correctly.
 
-Named migrations are allowed to run again even if they already succeeded or previously failed. That makes targeted troubleshooting possible, but it also means you should prefer a test database before forcing reruns.
+Named migrations are allowed to run again even if they already succeeded, previously failed, or were interrupted. That makes targeted troubleshooting possible, but it also means you should prefer a test database before forcing reruns. A migration that is not safe to repeat can only be continued this way after you have verified the schema; its note identifies the last completed statement.
+
+### Automatic Resume Policy
+
+By default, interrupted migrations block startup until an operator continues them. Set `PHOTOPRISM_MIGRATION_RESUME=true` (or use the `--migration-resume` flag) to rerun interrupted migrations automatically, but only when all of their statements are safe to repeat. The policy never applies to migrations younger than 60 minutes, since another process may still be executing them.

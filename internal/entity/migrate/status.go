@@ -63,8 +63,11 @@ func Status(db *gorm.DB, ids []string) (result Migrations, err error) {
 		if done, known := executed[migration.ID]; known {
 			migration.Dialect = done.Dialect
 			migration.Stage = done.Stage
+			migration.Status = done.Status
+			migration.Note = done.Note
 			migration.Error = done.Error
 			migration.Source = done.Source
+			migration.Progress = done.Progress
 			migration.StartedAt = done.StartedAt
 			migration.FinishedAt = done.FinishedAt
 			result = append(result, migration)

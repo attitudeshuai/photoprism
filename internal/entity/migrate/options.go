@@ -5,6 +5,7 @@ type Options struct {
 	AutoMigrate    bool
 	RunStage       string
 	RunFailed      bool
+	Resume         bool
 	Migrations     []string
 	DropDeprecated bool
 }
@@ -16,6 +17,7 @@ func Opt(runAll, runFailed bool, ids []string) Options {
 		AutoMigrate:    runAll,
 		RunStage:       StageMain,
 		RunFailed:      runFailed,
+		Resume:         runFailed,
 		Migrations:     ids,
 		DropDeprecated: runAll,
 	}
@@ -31,6 +33,7 @@ func (opt Options) Stage(name string) Options {
 		AutoMigrate:    false,
 		RunStage:       name,
 		RunFailed:      opt.RunFailed,
+		Resume:         opt.Resume,
 		Migrations:     opt.Migrations,
 		DropDeprecated: opt.DropDeprecated,
 	}

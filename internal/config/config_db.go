@@ -539,6 +539,12 @@ func (c *Config) InitDb() {
 	_ = c.MigrateDb(false, nil)
 }
 
+// MigrationResume reports whether interrupted schema migrations may be rerun automatically
+// when their statements are known to be safe to repeat.
+func (c *Config) MigrationResume() bool {
+	return c.options.MigrationResume
+}
+
 // MigrateDb will initialize the database and migrate the schema if necessary, and returns an error if
 // the schema could not be migrated.
 func (c *Config) MigrateDb(runFailed bool, ids []string) (err error) {
@@ -553,6 +559,9 @@ func (c *Config) MigrateDb(runFailed bool, ids []string) (err error) {
 	// Automatically migrate database schema only once per release to reduce startup time.
 	version := migrate.FirstOrCreateVersion(c.Db(), migrate.NewVersion(c.Version(), c.versionEdition()))
 	opt := migrate.Opt(version.NeedsMigration(), runFailed, ids)
+
+	// Interrupted migrations are rerun automatically only when declared safe by the configured policy.
+	opt.Resume = runFailed || c.MigrationResume()
 
 	// Record the version as migrated only once its schema was, so the next start migrates it again.
 	if err = entity.InitDb(opt); err != nil {

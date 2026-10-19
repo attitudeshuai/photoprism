@@ -18,12 +18,14 @@ func TestOptions_Stage(t *testing.T) {
 		assert.Equal(t, StagePre, pre.StageName())
 		assert.False(t, pre.AutoMigrate)
 		assert.True(t, pre.RunFailed)
+		assert.True(t, pre.Resume)
 	})
 	t.Run("Post", func(t *testing.T) {
 		post := opt.Post()
 		assert.Equal(t, StagePost, post.StageName())
 		assert.False(t, post.AutoMigrate)
 		assert.True(t, post.RunFailed)
+		assert.True(t, post.Resume)
 	})
 	t.Run("PostMigrationSkipped", func(t *testing.T) {
 		m := Migration{ID: "20260101-000001", Stage: StagePost}

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"github.com/photoprism/photoprism/internal/auth/session"
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/entity/migrate"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/internal/photoprism/backup"
@@ -95,7 +97,14 @@ func startAction(ctx *cli.Context) error {
 	cctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize the index database.
-	conf.InitDb()
+	conf.RegisterDb()
+
+	if err := conf.MigrateDb(false, nil); err != nil {
+		// Refuse to start while a migration may have left the schema only partially migrated.
+		if errors.Is(err, migrate.ErrInterrupted) {
+			log.Fatal(err)
+		}
+	}
 
 	// Check if the daemon is running, if not, initialize the daemon.
 	dctx := new(daemon.Context)

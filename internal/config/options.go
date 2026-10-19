@@ -222,6 +222,7 @@ type Options struct {
 	DatabaseProvisionPrefix   string        `yaml:"DatabaseProvisionPrefix" json:"-" flag:"database-provision-prefix"`
 	DatabaseProvisionDSN      string        `yaml:"DatabaseProvisionDSN" json:"-" flag:"database-provision-dsn"`
 	DatabaseProvisionProxyDSN string        `yaml:"DatabaseProvisionProxyDSN" json:"-" flag:"database-provision-proxy-dsn"`
+	MigrationResume           bool          `yaml:"MigrationResume" json:"-" flag:"migration-resume"`
 	FFmpegBin                 string        `yaml:"FFmpegBin" json:"-" flag:"ffmpeg-bin"`
 	FFmpegEncoder             string        `yaml:"FFmpegEncoder" json:"FFmpegEncoder" flag:"ffmpeg-encoder"`
 	FFmpegSize                int           `yaml:"FFmpegSize" json:"FFmpegSize" flag:"ffmpeg-size"`

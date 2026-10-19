@@ -113,14 +113,16 @@ func migrationsStatusAction(ctx *cli.Context) error {
 		}
 
 		switch {
-		case m.Error != "":
-			info = m.Error
 		case m.Finished():
 			info = "OK"
+		case m.Error != "":
+			info = m.Error
 		case m.StartedAt.IsZero():
 			info = "-"
-		case m.Repeat(false):
-			info = "Repeat"
+		case m.Interrupted():
+			info = m.Note
+		case m.Stale():
+			info = "Interrupted"
 		default:
 			info = "Running?"
 		}

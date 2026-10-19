@@ -92,6 +92,16 @@ func TestConfig_MigrateDbVersion(t *testing.T) {
 	assert.Nil(t, migrate.UnknownVersion.Find(c.Db()))
 }
 
+// TestConfig_MigrationResume pins the default interrupted-migration policy and its option getter.
+func TestConfig_MigrationResume(t *testing.T) {
+	c := NewMinimalTestConfig(t.TempDir())
+
+	assert.False(t, c.MigrationResume(), "startup waits for a manual decision by default")
+
+	c.options.MigrationResume = true
+	assert.True(t, c.MigrationResume())
+}
+
 // TestConfig_versionEdition checks that Portal builds record schema versions under an edition of their own.
 func TestConfig_versionEdition(t *testing.T) {
 	prevRole := DefaultNodeRole

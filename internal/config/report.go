@@ -308,6 +308,7 @@ func (c *Config) Report() (rows [][]string, cols []string) {
 		{"database-timeout", fmt.Sprintf("%d", c.DatabaseTimeout())},
 		{"database-conns", fmt.Sprintf("%d", c.DatabaseConns())},
 		{"database-conns-idle", fmt.Sprintf("%d", c.DatabaseConnsIdle())},
+		{"migration-resume", fmt.Sprintf("%t", c.MigrationResume())},
 		{"mariadb-bin", c.MariadbBin()},
 		{"mariadb-dump-bin", c.MariadbDumpBin()},
 	}...)

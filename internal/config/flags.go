@@ -1088,6 +1088,11 @@ var Flags = CliFlags{
 			Usage:   "maximum `NUMBER` of idle database connections",
 			EnvVars: EnvVars("DATABASE_CONNS_IDLE"),
 		}}, {
+		Flag: &cli.BoolFlag{
+			Name:    "migration-resume",
+			Usage:   "resumes interrupted schema migrations automatically when they are safe to repeat",
+			EnvVars: EnvVars("MIGRATION_RESUME"),
+		}}, {
 		Flag: &cli.StringFlag{
 			Name:    "database-provision-driver",
 			Usage:   "auto-provisioning `DRIVER` (auto, mysql)",

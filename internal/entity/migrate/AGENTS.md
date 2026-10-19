@@ -1,6 +1,6 @@
 # Migration Package Guidelines
 
-**Last Updated:** October 9, 2026
+**Last Updated:** October 15, 2026
 
 This file applies to `internal/entity/migrate/`. Read [`README.md`](README.md) here for the runtime flow, retry behavior, and CLI troubleshooting commands.
 
@@ -29,6 +29,6 @@ This file applies to `internal/entity/migrate/`. Read [`README.md`](README.md) h
 ## Runtime Model
 
 - The `versions` table gates the once-per-release schema initialization path.
-- The `migrations` table stores per-migration `started_at`, `finished_at`, and `error` state.
+- The `migrations` table stores per-migration `status` (`running`, `finished`, `failed`), `started_at`, `finished_at`, `error`, `note`, and `progress` (completed statements) state; rows written before `status` existed infer it from the timestamps via `Migration.State()`.
 - Normal startup does not rerun rows that already failed. Retrying failed rows requires `photoprism migrations run --failed` or explicitly naming migration IDs.
-- Unfinished rows without an error are treated as stale and repeatable only after 60 minutes. More recent unfinished rows are assumed to still be running.
+- Running rows younger than 60 minutes are assumed to belong to another live process and are skipped with a warning. Older running rows are interrupted: `Start` returns `ErrInterrupted` and blocks startup unless the migration is reentrant (`Migration.Reentrant()`, a conservative statement classifier in `migration.go`) and resume is declared via `Options.Resume` (`PHOTOPRISM_MIGRATION_RESUME`, or `--failed`). Non-reentrant or policy-disabled rows keep status `running` plus a blocking `note` for manual continuation by ID; failed and interrupted reruns share the same reset-to-running transition in `Migration.Begin()`.

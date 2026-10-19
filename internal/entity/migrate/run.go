@@ -1,12 +1,17 @@
 package migrate
 
 import (
+	"errors"
 	"fmt"
 
 	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/pkg/dsn"
 )
+
+// ErrInterrupted is returned when migrations marked as running were left behind
+// by a process that ended, so the schema may be only partially migrated.
+var ErrInterrupted = errors.New("migrate: interrupted migration")
 
 // Run automatically migrates the schema of the database passed as argument.
 func Run(db *gorm.DB, opt Options) (err error) {
@@ -36,8 +41,7 @@ func Run(db *gorm.DB, opt Options) (err error) {
 
 	// Run migrations for dialect.
 	if migrations, ok := Dialects[name]; ok {
-		migrations.Start(db, opt)
-		return nil
+		return migrations.Start(db, opt)
 	} else {
 		return fmt.Errorf("migrate: no migrations found for %s", name)
 	}
