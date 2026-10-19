@@ -1,7 +1,6 @@
 package workers
 
 import (
-	"errors"
 	"fmt"
 	"runtime/debug"
 	"time"
@@ -50,13 +49,18 @@ func (e *backupError) Unwrap() []error {
 }
 
 // StartScheduled starts a scheduled run of the backup worker based on the current configuration.
-func (w *Backup) StartScheduled() {
-	var failed *backupError
-
+// It returns ErrJobSkipped while another backup is in progress.
+func (w *Backup) StartScheduled() error {
 	// Failed steps have already been logged by Start.
-	if err := w.Start(w.conf.BackupDatabase(), w.conf.BackupAlbums(), true, w.conf.BackupRetain()); err != nil && !errors.As(err, &failed) {
-		log.Errorf("scheduler: %s (backup)", err)
+	if err := w.Start(w.conf.BackupDatabase(), w.conf.BackupAlbums(), true, w.conf.BackupRetain()); err != nil {
+		if mutex.BackupWorker.Running() {
+			return ErrJobSkipped
+		}
+
+		return err
 	}
+
+	return nil
 }
 
 // Start creates index and album backups based on the current configuration.

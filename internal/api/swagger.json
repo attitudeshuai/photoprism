@@ -1648,6 +1648,44 @@
             },
             "type": "object"
         },
+        "entity.JobRun": {
+            "properties": {
+                "Attempt": {
+                    "type": "integer"
+                },
+                "DurationMs": {
+                    "type": "integer"
+                },
+                "Error": {
+                    "type": "string"
+                },
+                "Final": {
+                    "type": "boolean"
+                },
+                "FinishedAt": {
+                    "type": "string"
+                },
+                "ID": {
+                    "type": "integer"
+                },
+                "Job": {
+                    "type": "string"
+                },
+                "StartedAt": {
+                    "type": "string"
+                },
+                "Status": {
+                    "type": "string"
+                },
+                "Trigger": {
+                    "type": "string"
+                },
+                "UID": {
+                    "type": "string"
+                }
+            },
+            "type": "object"
+        },
         "entity.Label": {
             "properties": {
                 "CreatedAt": {
@@ -5526,6 +5564,47 @@
                 }
             },
             "type": "object"
+        },
+        "workers.JobInfo": {
+            "properties": {
+                "backoffs": {
+                    "items": {
+                        "type": "integer"
+                    },
+                    "type": "array"
+                },
+                "consecutiveFailures": {
+                    "type": "integer"
+                },
+                "latestRun": {
+                    "$ref": "#/definitions/entity.JobRun"
+                },
+                "maxAttempts": {
+                    "type": "integer"
+                },
+                "maxFailures": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "running": {
+                    "type": "boolean"
+                },
+                "schedule": {
+                    "type": "string"
+                },
+                "scheduled": {
+                    "type": "boolean"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "struggling": {
+                    "type": "boolean"
+                }
+            },
+            "type": "object"
         }
     },
     "externalDocs": {
@@ -9135,6 +9214,191 @@
                 "summary": "start indexing",
                 "tags": [
                     "Library"
+                ]
+            }
+        },
+        "/api/v1/jobs": {
+            "get": {
+                "operationId": "GetJobs",
+                "produces": [
+                    "application/json"
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "items": {
+                                "$ref": "#/definitions/workers.JobInfo"
+                            },
+                            "type": "array"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    }
+                },
+                "summary": "returns registered background jobs with their latest run state",
+                "tags": [
+                    "Jobs"
+                ]
+            }
+        },
+        "/api/v1/jobs/{name}/run": {
+            "post": {
+                "operationId": "RunJobNow",
+                "parameters": [
+                    {
+                        "description": "job name",
+                        "in": "path",
+                        "name": "name",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "additionalProperties": {
+                                "type": "string"
+                            },
+                            "type": "object"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    }
+                },
+                "summary": "triggers a background job to run now",
+                "tags": [
+                    "Jobs"
+                ]
+            }
+        },
+        "/api/v1/jobs/{name}/runs": {
+            "get": {
+                "operationId": "SearchJobRuns",
+                "parameters": [
+                    {
+                        "description": "job name",
+                        "in": "path",
+                        "name": "name",
+                        "required": true,
+                        "type": "string"
+                    },
+                    {
+                        "description": "maximum number of results",
+                        "in": "query",
+                        "maximum": 1000,
+                        "minimum": 1,
+                        "name": "count",
+                        "type": "integer"
+                    },
+                    {
+                        "description": "search result offset",
+                        "in": "query",
+                        "minimum": 0,
+                        "name": "offset",
+                        "type": "integer"
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "headers": {
+                            "X-Count": {
+                                "description": "The actual number of runs returned",
+                                "type": "number"
+                            },
+                            "X-Limit": {
+                                "description": "The limit of the number of runs to be returned",
+                                "type": "number"
+                            },
+                            "X-Offset": {
+                                "description": "The offset that was used",
+                                "type": "number"
+                            }
+                        },
+                        "schema": {
+                            "$ref": "#/definitions/entity.JobRun"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/i18n.Response"
+                        }
+                    }
+                },
+                "summary": "returns the most recent logged runs of a background job",
+                "tags": [
+                    "Jobs"
                 ]
             }
         },

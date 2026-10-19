@@ -75,6 +75,7 @@ const (
 	ResourceUsers     Resource = "users"
 	ResourceSessions  Resource = "sessions"
 	ResourceLogs      Resource = "logs"
+	ResourceJobs      Resource = "jobs"
 	ResourceApi       Resource = "api"
 	ResourceWebDAV    Resource = "webdav"
 	ResourceWebhooks  Resource = "webhooks"

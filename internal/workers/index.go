@@ -28,10 +28,8 @@ func NewIndex(conf *config.Config) *Index {
 }
 
 // StartScheduled starts a scheduled run of the indexing worker based on the current configuration.
-func (w *Index) StartScheduled() {
-	if err := w.Start(); err != nil {
-		log.Errorf("scheduler: %s (index)", err)
-	}
+func (w *Index) StartScheduled() error {
+	return w.Start()
 }
 
 // Start runs the indexing worker once.

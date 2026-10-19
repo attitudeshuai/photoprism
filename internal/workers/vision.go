@@ -40,23 +40,21 @@ func NewVision(conf *config.Config) *Vision {
 
 // StartScheduled executes the worker in scheduled mode, selecting models that
 // are allowed to run in the RunOnSchedule context.
-func (w *Vision) StartScheduled() {
+func (w *Vision) StartScheduled() error {
 	models := w.scheduledModels()
 
 	if len(models) == 0 {
-		return
+		return nil
 	}
 
-	if err := w.Start(
+	return w.Start(
 		w.conf.VisionFilter(),
 		0,
 		models,
 		entity.SrcAuto,
 		false,
 		vision.RunOnSchedule,
-	); err != nil {
-		log.Errorf("scheduler: %s (vision)", err)
-	}
+	)
 }
 
 // scheduledModels returns the model types that should run for scheduled jobs.

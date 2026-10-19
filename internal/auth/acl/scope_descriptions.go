@@ -27,6 +27,7 @@ var ScopeDescriptions = map[string]string{
 	ResourceUsers.String():     "Administer user accounts and profiles.",
 	ResourceSessions.String():  "Inspect and revoke active sessions and tokens.",
 	ResourceLogs.String():      "Read system, audit, and application logs.",
+	ResourceJobs.String():      "Inspect background job runs and trigger jobs manually.",
 	ResourceApi.String():       "Call generic API endpoints outside other scopes.",
 	ResourceWebDAV.String():    "Access the WebDAV interface for syncing files.",
 	ResourceWebhooks.String():  "Manage webhook subscriptions and deliveries.",

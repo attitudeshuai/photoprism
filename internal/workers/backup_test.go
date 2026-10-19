@@ -252,8 +252,10 @@ func TestBackup_StartScheduled(t *testing.T) {
 		w, _, hook := newStubBackup(t, errors.New("database step error"), nil)
 		opt.BackupDatabase = true
 
-		w.StartScheduled()
+		err := w.StartScheduled()
 
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "database backup failed")
 		assert.Equal(t, []string{"backup: database step error (database)", "backup: database backup failed"}, errorMessages(hook))
 	})
 	t.Run("PanicLogged", func(t *testing.T) {
@@ -263,9 +265,11 @@ func TestBackup_StartScheduled(t *testing.T) {
 			panic("database step panic")
 		}
 
-		w.StartScheduled()
+		err := w.StartScheduled()
 
-		assert.True(t, logged(hook, logrus.ErrorLevel, "scheduler: backup: database step panic (worker panic)"))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "worker panic")
+		assert.True(t, logged(hook, logrus.ErrorLevel, "backup: database step panic (worker panic)"))
 	})
 	t.Run("Busy", func(t *testing.T) {
 		w, calls, hook := newStubBackup(t, nil, nil)
@@ -273,10 +277,11 @@ func TestBackup_StartScheduled(t *testing.T) {
 		require.NoError(t, mutex.BackupWorker.Start())
 		t.Cleanup(mutex.BackupWorker.Stop)
 
-		w.StartScheduled()
+		err := w.StartScheduled()
 
+		assert.ErrorIs(t, err, ErrJobSkipped)
 		assert.Empty(t, *calls)
-		assert.Equal(t, []string{"scheduler: already running (backup)"}, errorMessages(hook))
+		assert.Empty(t, errorMessages(hook))
 	})
 }
 

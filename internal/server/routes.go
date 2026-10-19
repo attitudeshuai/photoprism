@@ -221,6 +221,11 @@ func registerRoutes(router *gin.Engine, conf *config.Config) {
 	// be exposed (e.g. for security reasons).
 	api.ServeMCP(APIv1)
 
+	// Background Jobs.
+	api.GetJobs(APIv1)
+	api.SearchJobRuns(APIv1)
+	api.RunJobNow(APIv1)
+
 	// Technical Endpoints.
 	api.GetSvg(APIv1)
 	api.GetStatus(APIv1)

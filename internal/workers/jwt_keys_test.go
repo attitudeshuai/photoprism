@@ -34,7 +34,7 @@ func TestRunJWTKeyRotation(t *testing.T) {
 	// The portal gate is what RunJWTKeyRotation adds over rotateJWTKeys, so it is what
 	// these cases cover; the rotation itself is exercised through rotateJWTKeys below.
 	t.Run("NilConfig", func(t *testing.T) {
-		assert.NotPanics(t, func() { RunJWTKeyRotation(nil) })
+		assert.NoError(t, RunJWTKeyRotation(nil))
 	})
 	t.Run("NotAPortal", func(t *testing.T) {
 		c := config.NewMinimalTestConfig(t.TempDir())
@@ -46,21 +46,21 @@ func TestRunJWTKeyRotation(t *testing.T) {
 		jwtManager = func() *jwt.Manager { resolved = true; return nil }
 		t.Cleanup(func() { jwtManager = original })
 
-		RunJWTKeyRotation(c)
+		assert.NoError(t, RunJWTKeyRotation(c))
 		assert.False(t, resolved)
 	})
 }
 
 func TestRotateJWTKeys(t *testing.T) {
 	t.Run("NoManager", func(t *testing.T) {
-		assert.NotPanics(t, func() { rotateJWTKeys(nil, 90) })
+		assert.NoError(t, rotateJWTKeys(nil, 90))
 	})
 	t.Run("NotDue", func(t *testing.T) {
 		m := newJWTTestManager(t)
 		before, err := m.EnsureActiveKey()
 		require.NoError(t, err)
 
-		rotateJWTKeys(m, 90)
+		assert.NoError(t, rotateJWTKeys(m, 90))
 
 		after, err := m.ActiveKey()
 		require.NoError(t, err)
@@ -73,7 +73,7 @@ func TestRotateJWTKeys(t *testing.T) {
 		require.NoError(t, err)
 
 		m.SetNow(func() time.Time { return time.Now().UTC().Add(10 * 365 * 24 * time.Hour) })
-		rotateJWTKeys(m, 0)
+		assert.NoError(t, rotateJWTKeys(m, 0))
 
 		after, err := m.ActiveKey()
 		require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestRotateJWTKeys(t *testing.T) {
 
 		// Move past the configured lifetime so the run is due.
 		m.SetNow(func() time.Time { return time.Now().UTC().Add(91 * 24 * time.Hour) })
-		rotateJWTKeys(m, 90)
+		assert.NoError(t, rotateJWTKeys(m, 90))
 
 		after, err := m.ActiveKey()
 		require.NoError(t, err)

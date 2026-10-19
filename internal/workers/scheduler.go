@@ -1,6 +1,7 @@
 package workers
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/go-co-op/gocron/v2"
@@ -17,18 +18,20 @@ func init() {
 	Jobs = make(map[string]gocron.Job)
 }
 
-// NewJob adds a new background job to the scheduler, see https://pkg.go.dev/github.com/go-co-op/gocron/v2.
-func NewJob(name, schedule string, function func(), parameters ...any) error {
-	if schedule == "" {
-		return nil
-	}
-
+// NewJob schedules the job registered under name with the given cron expression,
+// see https://pkg.go.dev/github.com/go-co-op/gocron/v2. An empty schedule creates no
+// cron job, while the registered task stays available for manual runs.
+func NewJob(name, schedule string) error {
 	if name == "" {
 		return fmt.Errorf("new job requires a name")
 	}
 
-	if function == nil {
-		return fmt.Errorf("new job requires a task to run")
+	if schedule == "" {
+		return nil
+	}
+
+	if _, err := lookupJob(name); err != nil {
+		return err
 	}
 
 	job, err := Scheduler.NewJob(
@@ -37,8 +40,12 @@ func NewJob(name, schedule string, function func(), parameters ...any) error {
 			false,
 		),
 		gocron.NewTask(
-			function,
-			parameters...,
+			func() {
+				if err := RunJob(name, TriggerSchedule); err != nil &&
+					!errors.Is(err, ErrJobAlreadyRunning) && !errors.Is(err, ErrJobSkipped) {
+					log.Debugf("scheduler: %s (%s)", err, name)
+				}
+			},
 		),
 		gocron.WithSingletonMode(gocron.LimitModeWait),
 	)
@@ -49,5 +56,17 @@ func NewJob(name, schedule string, function func(), parameters ...any) error {
 
 	Jobs[name] = job
 
+	markJobScheduled(name, schedule)
+
 	return nil
+}
+
+// markJobScheduled records the cron expression of the scheduled job for status snapshots.
+func markJobScheduled(name, schedule string) {
+	jobRegistry.Lock()
+	defer jobRegistry.Unlock()
+
+	if job := jobRegistry.jobs[name]; job != nil {
+		job.schedule = schedule
+	}
 }

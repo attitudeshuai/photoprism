@@ -19,36 +19,38 @@ var jwtManager = get.JWTManager
 
 // RunJWTKeyRotation replaces the portal JWT signing key once it reaches the configured
 // lifetime. The due-date check reads memory only, so a run that is not due touches no disk.
-func RunJWTKeyRotation(conf *config.Config) {
+// It returns the rotation or retirement error so the job ledger can record the failure.
+func RunJWTKeyRotation(conf *config.Config) error {
 	if conf == nil || !conf.Portal() {
-		return
+		return nil
 	}
 
 	days := conf.JWTRotateDays()
 
 	if days <= 0 {
-		return
+		return nil
 	}
 
-	rotateJWTKeys(jwtManager(), days)
+	return rotateJWTKeys(jwtManager(), days)
 }
 
 // rotateJWTKeys rotates the signing key held by manager once it reaches days, and
 // otherwise reapplies a retirement that an earlier run did not persist.
-func rotateJWTKeys(manager *jwt.Manager, days int) {
+func rotateJWTKeys(manager *jwt.Manager, days int) error {
 	if manager == nil {
-		return
+		return nil
 	}
 
 	if !manager.NeedsRotation(time.Duration(days) * 24 * time.Hour) {
 		// Pick up a key whose retirement did not reach disk on an earlier run.
 		if n, err := manager.RetireSuperseded(); err != nil {
 			event.SystemError([]string{"jwt", "retire superseded signing key", "%s"}, clean.ErrorFull(err))
+			return err
 		} else if n > 0 {
 			event.SystemInfo([]string{"jwt", "retired %d superseded signing keys"}, n)
 		}
 
-		return
+		return nil
 	}
 
 	key, err := manager.RotateKey()
@@ -63,4 +65,6 @@ func rotateJWTKeys(manager *jwt.Manager, days int) {
 	default:
 		event.SystemInfo([]string{"jwt", "rotated signing key after %d days", "new key id %s"}, days, clean.Log(key.Kid))
 	}
+
+	return err
 }

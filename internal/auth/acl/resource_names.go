@@ -24,6 +24,7 @@ var ResourceNames = []Resource{
 	ResourceUsers,
 	ResourceSessions,
 	ResourceLogs,
+	ResourceJobs,
 	ResourceApi,
 	ResourceWebDAV,
 	ResourceWebhooks,

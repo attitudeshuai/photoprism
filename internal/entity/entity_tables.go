@@ -30,6 +30,7 @@ var Entities = Tables{
 	migrate.Migration{}.TableName(): &migrate.Migration{},
 	migrate.Version{}.TableName():   &migrate.Version{},
 	Error{}.TableName():             &Error{},
+	JobRun{}.TableName():            &JobRun{},
 	Password{}.TableName():          &Password{},
 	Passcode{}.TableName():          &Passcode{},
 	User{}.TableName():              &User{},

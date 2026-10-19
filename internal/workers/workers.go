@@ -42,6 +42,21 @@ import (
 var log = event.Log
 var stop = make(chan bool, 1)
 
+// Retry policies of the cron jobs. Jobs without a policy keep their historical
+// behavior of a single attempt without a struggling state.
+var (
+	backupRetryPolicy = RetryPolicy{
+		MaxAttempts: 3,
+		Backoffs:    []time.Duration{time.Minute, 5 * time.Minute},
+		MaxFailures: 3,
+	}
+	indexRetryPolicy = RetryPolicy{
+		MaxAttempts: 2,
+		Backoffs:    []time.Duration{5 * time.Minute},
+		MaxFailures: 3,
+	}
+)
+
 // Start launches background workers and scheduled tasks based on the current
 // configuration. It sets up the cron scheduler and the periodic metadata/share
 // workers.
@@ -52,8 +67,10 @@ func Start(conf *config.Config) {
 	} else if scheduler != nil {
 		Scheduler = scheduler
 
-		// Schedule backup job.
-		if err = NewJob("backup", conf.BackupSchedule(), NewBackup(conf).StartScheduled); err != nil {
+		// Register backup job; it can also be triggered manually without a cron schedule.
+		if err = RegisterJob("backup", NewBackup(conf).StartScheduled, WithRetryPolicy(backupRetryPolicy)); err != nil {
+			log.Errorf("scheduler: %s (backup)", err)
+		} else if err = NewJob("backup", conf.BackupSchedule()); err != nil {
 			log.Errorf("scheduler: %s (backup)", err)
 		}
 
@@ -61,7 +78,9 @@ func Start(conf *config.Config) {
 		// check runs as well, since a portal that is never up at the scheduled hour would
 		// otherwise never reach a tick.
 		if conf.Portal() {
-			if err = NewJob("jwt-keys", JWTKeySchedule, func() { RunJWTKeyRotation(conf) }); err != nil {
+			if err = RegisterJob("jwt-keys", func() error { return RunJWTKeyRotation(conf) }, WithRetryPolicy(backupRetryPolicy)); err != nil {
+				log.Errorf("scheduler: %s (jwt keys)", err)
+			} else if err = NewJob("jwt-keys", JWTKeySchedule); err != nil {
 				event.SystemError([]string{"scheduler", "jwt keys", "%s"}, clean.ErrorFull(err))
 			}
 
@@ -70,13 +89,17 @@ func Start(conf *config.Config) {
 
 		// Only schedule index and vision jobs if this is not a portal.
 		if !conf.Portal() {
-			// Schedule indexing job.
-			if err = NewJob("index", conf.IndexSchedule(), NewIndex(conf).StartScheduled); err != nil {
+			// Register indexing job.
+			if err = RegisterJob("index", NewIndex(conf).StartScheduled, WithRetryPolicy(indexRetryPolicy)); err != nil {
+				log.Errorf("scheduler: %s (index)", err)
+			} else if err = NewJob("index", conf.IndexSchedule()); err != nil {
 				log.Errorf("scheduler: %s (index)", err)
 			}
 
-			// Schedule vision job.
-			if err = NewJob("vision", conf.VisionSchedule(), NewVision(conf).StartScheduled); err != nil {
+			// Register vision job.
+			if err = RegisterJob("vision", NewVision(conf).StartScheduled, WithRetryPolicy(indexRetryPolicy)); err != nil {
+				log.Errorf("scheduler: %s (vision)", err)
+			} else if err = NewJob("vision", conf.VisionSchedule()); err != nil {
 				log.Errorf("scheduler: %s (vision)", err)
 			}
 		}
@@ -90,6 +113,8 @@ func Start(conf *config.Config) {
 		log.Infof("config: disabled metadata, share & sync background workers")
 		return
 	}
+
+	registerMaintenanceJobs(conf)
 
 	// Start the other background workers.
 	interval := conf.WakeupInterval()
@@ -112,20 +137,87 @@ func Start(conf *config.Config) {
 				mutex.SyncWorker.Cancel()
 				return
 			case <-ticker.C:
-				event.Safe(func() {
-					RunMeta(conf)
-					RunShare(conf)
-					RunSync(conf)
-					RunPurgeExpired(conf)
-				})
+				StartMaintenanceJobs()
 			}
 		}
 	}()
 }
 
+// maintenanceJobs lists the wakeup-ticker jobs in their launch order.
+var maintenanceJobs = []string{"meta", "share", "sync", "purge-expired"}
+
+// registerMaintenanceJobs registers the wakeup-ticker jobs without retry policies,
+// so their scheduling and execution behavior stays unchanged while their runs are
+// recorded in the job ledger and they can be triggered manually.
+func registerMaintenanceJobs(conf *config.Config) {
+	if err := RegisterJob("meta", func() error {
+		if mutex.WorkersRunning() {
+			return ErrJobSkipped
+		}
+
+		return runMetaCycle(conf)
+	}); err != nil {
+		log.Errorf("scheduler: %s (meta)", err)
+	}
+
+	if err := RegisterJob("share", func() error {
+		if mutex.ShareWorker.Running() {
+			return ErrJobSkipped
+		}
+
+		if err := NewShare(conf).Start(); err != nil {
+			if mutex.ShareWorker.Running() {
+				return ErrJobSkipped
+			}
+
+			return err
+		}
+
+		return nil
+	}); err != nil {
+		log.Errorf("scheduler: %s (share)", err)
+	}
+
+	if err := RegisterJob("sync", func() error {
+		if mutex.SyncWorker.Running() {
+			return ErrJobSkipped
+		}
+
+		if err := NewSync(conf).Start(); err != nil {
+			if mutex.SyncWorker.Running() {
+				return ErrJobSkipped
+			}
+
+			return err
+		}
+
+		return nil
+	}); err != nil {
+		log.Errorf("scheduler: %s (sync)", err)
+	}
+
+	if err := RegisterJob("purge-expired", func() error {
+		RunPurgeExpired(conf)
+		return nil
+	}); err != nil {
+		log.Errorf("scheduler: %s (purge expired)", err)
+	}
+}
+
+// StartMaintenanceJobs starts the wakeup-ticker jobs once, each in its own goroutine.
+func StartMaintenanceJobs() {
+	for _, name := range maintenanceJobs {
+		if _, err := StartJob(name, TriggerSchedule); err != nil {
+			log.Debugf("scheduler: %s (%s)", err, name)
+		}
+	}
+}
+
 // Shutdown stops the background workers and shuts down the scheduler.
 func Shutdown() {
 	log.Info("shutting down workers")
+
+	signalJobShutdown()
 
 	stop <- true
 
@@ -140,16 +232,21 @@ func Shutdown() {
 func RunMeta(conf *config.Config) {
 	if !mutex.WorkersRunning() {
 		go func() {
-			worker := NewMeta(conf)
-
-			delay := time.Minute
-			interval := entity.MetadataUpdateInterval
-
-			if err := worker.Start(delay, interval, false); err != nil {
+			if err := runMetaCycle(conf); err != nil {
 				log.Warnf("metadata: %s", err)
 			}
 		}()
 	}
+}
+
+// runMetaCycle performs one metadata maintenance cycle.
+func runMetaCycle(conf *config.Config) error {
+	worker := NewMeta(conf)
+
+	delay := time.Minute
+	interval := entity.MetadataUpdateInterval
+
+	return worker.Start(delay, interval, false)
 }
 
 // RunShare runs the share worker once.

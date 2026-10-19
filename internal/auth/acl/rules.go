@@ -114,6 +114,10 @@ var Rules = ACL{
 		RolePortal: GrantFullAccess,
 		RoleClient: GrantFullAccess,
 	},
+	ResourceJobs: Roles{
+		RoleAdmin:  GrantFullAccess,
+		RolePortal: GrantFullAccess,
+	},
 	ResourceApi: Roles{
 		RoleAdmin:  GrantFullAccess,
 		RoleClient: GrantPublishOwn,
